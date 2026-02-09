@@ -145,7 +145,9 @@ function classifyChange(ev, lastCheckedIso) {
 function postToDiscordInChunks(webhookUrl, messages) {
   const maxLen = 1800; // 余裕を持って分割
   let buffer = '';
-  for (const msg of messages) {
+  for (const rawMsg of messages) {
+    const msg = normalizeDiscordMessage(rawMsg, maxLen);
+    if (!msg) continue;
     if ((buffer + '\n\n' + msg).length > maxLen) {
       if (buffer) postToDiscord(webhookUrl, buffer);
       buffer = msg;
@@ -154,6 +156,14 @@ function postToDiscordInChunks(webhookUrl, messages) {
     }
   }
   if (buffer) postToDiscord(webhookUrl, buffer);
+}
+
+function normalizeDiscordMessage(message, maxLen) {
+  if (!message) return '';
+  if (message.length <= maxLen) return message;
+  const ellipsis = '…';
+  const limit = Math.max(maxLen - ellipsis.length, 0);
+  return `${message.slice(0, limit)}${ellipsis}`;
 }
 
 /**
