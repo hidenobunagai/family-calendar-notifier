@@ -1,13 +1,13 @@
 const PROP_KEYS = {
-  lastCheckedAt: 'LAST_CHECKED_AT',
-  calendarId: 'CALENDAR_ID',
-  webhookUrl: 'DISCORD_WEBHOOK_URL',
-  notifiedCache: 'NOTIFIED_CACHE',
+  lastCheckedAt: "LAST_CHECKED_AT",
+  calendarId: "CALENDAR_ID",
+  webhookUrl: "DISCORD_WEBHOOK_URL",
+  notifiedCache: "NOTIFIED_CACHE",
 };
 
 const DEFAULT_LOOKBACK_MS = 6 * 60 * 60 * 1000; // 6 hours
 const SAFETY_OFFSET_MS = 60 * 1000; // rewind by 60 seconds to avoid misses
-const CALENDAR_API_BASE = 'https://www.googleapis.com/calendar/v3';
+const CALENDAR_API_BASE = "https://www.googleapis.com/calendar/v3";
 const TRIGGER_INTERVAL_MINUTES = 5;
 const MAX_NOTIFIED_CACHE_ENTRIES = 200;
 const DISCORD_CHUNK_INTERVAL_MS = 1000; // レート制限対策: チャンク間待機 (ms)
@@ -17,11 +17,11 @@ const DISCORD_CHUNK_INTERVAL_MS = 1000; // レート制限対策: チャンク�
  */
 function pollCalendarAndNotify() {
   const props = PropertiesService.getScriptProperties();
-  const calendarId = (props.getProperty(PROP_KEYS.calendarId) || '').trim();
-  const webhookUrl = (props.getProperty(PROP_KEYS.webhookUrl) || '').trim();
+  const calendarId = (props.getProperty(PROP_KEYS.calendarId) || "").trim();
+  const webhookUrl = (props.getProperty(PROP_KEYS.webhookUrl) || "").trim();
 
   if (!calendarId || !webhookUrl) {
-    logWarn('Script Properties に CALENDAR_ID / DISCORD_WEBHOOK_URL が未設定です。');
+    logWarn("Script Properties に CALENDAR_ID / DISCORD_WEBHOOK_URL が未設定です。");
     return;
   }
 
@@ -34,23 +34,25 @@ function pollCalendarAndNotify() {
   try {
     updates = fetchCalendarUpdates(calendarId, lastCheckedIso);
   } catch (err) {
-    logError('Calendar API 呼び出しに失敗しました。設定や権限を確認してください。', err);
+    logError("Calendar API 呼び出しに失敗しました。設定や権限を確認してください。", err);
     throw err;
   }
 
   const cache = loadNotifiedCache(props);
   const newUpdates = updates.filter(({ ev }) => !isAlreadyNotified(cache, ev));
 
-  logInfo(`Calendar diff: ${updates.length} updates since ${lastCheckedIso} -> ${nowIso} (${newUpdates.length} new)`);
+  logInfo(
+    `Calendar diff: ${updates.length} updates since ${lastCheckedIso} -> ${nowIso} (${newUpdates.length} new)`,
+  );
   if (newUpdates.length) {
-    const tz = Session.getScriptTimeZone() || 'Asia/Tokyo';
+    const tz = Session.getScriptTimeZone() || "Asia/Tokyo";
     const messages = newUpdates.map(({ kind, ev }) => buildDiscordMessage(kind, ev, tz));
     try {
       postToDiscordInChunks(webhookUrl, messages);
       newUpdates.forEach(({ ev }) => markNotified(cache, ev));
       saveNotifiedCache(props, cache);
     } catch (err) {
-      logError('Discord 送信処理でエラーが発生しました。Webhook URL を確認してください。', err);
+      logError("Discord 送信処理でエラーが発生しました。Webhook URL を確認してください。", err);
       throw err;
     }
   }
@@ -97,22 +99,22 @@ function computeLastCheckedDate(rawValue, now) {
 function listCalendarEvents(calendarId, updatedMin, pageToken) {
   const params = {
     updatedMin,
-    showDeleted: 'true',
-    singleEvents: 'false',
-    maxResults: '2500',
-    orderBy: 'updated',
+    showDeleted: "true",
+    singleEvents: "false",
+    maxResults: "2500",
+    orderBy: "updated",
   };
   if (pageToken) params.pageToken = pageToken;
 
   const query = Object.keys(params)
     .filter((key) => params[key])
     .map((key) => `${encodeURIComponent(key)}=${encodeURIComponent(params[key])}`)
-    .join('&');
+    .join("&");
 
-  const url = `${CALENDAR_API_BASE}/calendars/${encodeURIComponent(calendarId)}/events${query ? `?${query}` : ''}`;
+  const url = `${CALENDAR_API_BASE}/calendars/${encodeURIComponent(calendarId)}/events${query ? `?${query}` : ""}`;
 
   const res = UrlFetchApp.fetch(url, {
-    method: 'get',
+    method: "get",
     headers: { Authorization: `Bearer ${ScriptApp.getOAuthToken()}` },
     muteHttpExceptions: true,
   });
@@ -120,7 +122,7 @@ function listCalendarEvents(calendarId, updatedMin, pageToken) {
   const code = res.getResponseCode();
   const text = res.getContentText();
   if (code >= 200 && code < 300) {
-    return JSON.parse(text || '{}');
+    return JSON.parse(text || "{}");
   }
 
   let message = `Calendar API error (status ${code})`;
@@ -142,9 +144,9 @@ function classifyChange(ev, lastCheckedIso) {
   const lastCheckedMs = new Date(lastCheckedIso).getTime();
   const createdMs = ev.created ? new Date(ev.created).getTime() : 0;
   const updatedMs = ev.updated ? new Date(ev.updated).getTime() : 0;
-  if (ev.status === 'cancelled') return 'キャンセル';
-  if (createdMs > lastCheckedMs) return '新規';
-  if (updatedMs > lastCheckedMs) return '更新';
+  if (ev.status === "cancelled") return "キャンセル";
+  if (createdMs > lastCheckedMs) return "新規";
+  if (updatedMs > lastCheckedMs) return "更新";
   return null;
 }
 
@@ -154,13 +156,13 @@ function classifyChange(ev, lastCheckedIso) {
 function postToDiscordInChunks(webhookUrl, messages) {
   const maxLen = 1800; // 余裕を持って分割
   const chunks = [];
-  let buffer = '';
+  let buffer = "";
   for (const msg of messages) {
-    if ((buffer + '\n\n' + msg).length > maxLen) {
+    if ((buffer + "\n\n" + msg).length > maxLen) {
       if (buffer) chunks.push(buffer);
       buffer = msg;
     } else {
-      buffer = buffer ? buffer + '\n\n' + msg : msg;
+      buffer = buffer ? buffer + "\n\n" + msg : msg;
     }
   }
   if (buffer) chunks.push(buffer);
@@ -176,8 +178,8 @@ function postToDiscordInChunks(webhookUrl, messages) {
 function postToDiscord(webhookUrl, content) {
   const payload = { content };
   const params = {
-    method: 'post',
-    contentType: 'application/json',
+    method: "post",
+    contentType: "application/json",
     payload: JSON.stringify(payload),
     muteHttpExceptions: true,
   };
@@ -195,7 +197,7 @@ function postToDiscord(webhookUrl, content) {
  * 5分毎の時間主導トリガーを作成
  */
 function installTrigger() {
-  const fn = 'pollCalendarAndNotify';
+  const fn = "pollCalendarAndNotify";
   const triggers = ScriptApp.getProjectTriggers();
   const exists = triggers.some((t) => t.getHandlerFunction() === fn);
   if (!exists) {
@@ -215,7 +217,7 @@ function uninstallAllTriggers() {
 
 function loadNotifiedCache(props) {
   try {
-    return JSON.parse(props.getProperty(PROP_KEYS.notifiedCache) || '{}');
+    return JSON.parse(props.getProperty(PROP_KEYS.notifiedCache) || "{}");
   } catch (_) {
     return {};
   }
