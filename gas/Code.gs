@@ -80,20 +80,23 @@ function fetchCalendarUpdates(calendarId, lastCheckedIso) {
 }
 
 function computeLastCheckedDate(rawValue, now) {
-  const fallback = now.getTime() - DEFAULT_LOOKBACK_MS;
+  // updatedMin が古すぎると Calendar API が 410 を返すため、最大遡り幅を DEFAULT_LOOKBACK_MS でキャップ
+  const floorMs = now.getTime() - DEFAULT_LOOKBACK_MS;
+
   if (!rawValue) {
-    return new Date(fallback - SAFETY_OFFSET_MS);
+    return new Date(floorMs - SAFETY_OFFSET_MS);
   }
 
   const parsed = new Date(rawValue);
   const parsedMs = parsed.getTime();
   if (Number.isNaN(parsedMs)) {
     logWarn(`LAST_CHECKED_AT (${rawValue}) が不正だったためリセットします。`);
-    return new Date(fallback - SAFETY_OFFSET_MS);
+    return new Date(floorMs - SAFETY_OFFSET_MS);
   }
 
-  const rewound = Math.max(parsedMs - SAFETY_OFFSET_MS, 0);
-  return new Date(rewound);
+  // SAFETY_OFFSET で少し巻き戻しつつ、古すぎる場合は floorMs でキャップ
+  const rewound = parsedMs - SAFETY_OFFSET_MS;
+  return new Date(Math.max(rewound, floorMs));
 }
 
 function listCalendarEvents(calendarId, updatedMin, pageToken) {
