@@ -2,11 +2,15 @@ const PROP_KEYS = {
   lastCheckedAt: 'LAST_CHECKED_AT',
   calendarId: 'CALENDAR_ID',
   webhookUrl: 'DISCORD_WEBHOOK_URL',
+  notifiedCache: 'NOTIFIED_CACHE',
 };
 
 const DEFAULT_LOOKBACK_MS = 6 * 60 * 60 * 1000; // 6 hours
 const SAFETY_OFFSET_MS = 60 * 1000; // rewind by 60 seconds to avoid misses
 const CALENDAR_API_BASE = 'https://www.googleapis.com/calendar/v3';
+const TRIGGER_INTERVAL_MINUTES = 5;
+const MAX_NOTIFIED_CACHE_ENTRIES = 200;
+const DISCORD_CHUNK_INTERVAL_MS = 1000; // レート制限対策: チャンク間待機 (ms)
 
 /**
  * 直近の更新差分を取得して Discord に通知
@@ -34,12 +38,17 @@ function pollCalendarAndNotify() {
     throw err;
   }
 
-  logInfo(`Calendar diff: ${updates.length} updates since ${lastCheckedIso} -> ${nowIso}`);
-  if (updates.length) {
+  const cache = loadNotifiedCache(props);
+  const newUpdates = updates.filter(({ ev }) => !isAlreadyNotified(cache, ev));
+
+  logInfo(`Calendar diff: ${updates.length} updates since ${lastCheckedIso} -> ${nowIso} (${newUpdates.length} new)`);
+  if (newUpdates.length) {
     const tz = Session.getScriptTimeZone() || 'Asia/Tokyo';
-    const messages = updates.map(({ kind, ev }) => buildDiscordMessage(kind, ev, tz));
+    const messages = newUpdates.map(({ kind, ev }) => buildDiscordMessage(kind, ev, tz));
     try {
       postToDiscordInChunks(webhookUrl, messages);
+      newUpdates.forEach(({ ev }) => markNotified(cache, ev));
+      saveNotifiedCache(props, cache);
     } catch (err) {
       logError('Discord 送信処理でエラーが発生しました。Webhook URL を確認してください。', err);
       throw err;
@@ -144,16 +153,21 @@ function classifyChange(ev, lastCheckedIso) {
  */
 function postToDiscordInChunks(webhookUrl, messages) {
   const maxLen = 1800; // 余裕を持って分割
+  const chunks = [];
   let buffer = '';
   for (const msg of messages) {
     if ((buffer + '\n\n' + msg).length > maxLen) {
-      if (buffer) postToDiscord(webhookUrl, buffer);
+      if (buffer) chunks.push(buffer);
       buffer = msg;
     } else {
       buffer = buffer ? buffer + '\n\n' + msg : msg;
     }
   }
-  if (buffer) postToDiscord(webhookUrl, buffer);
+  if (buffer) chunks.push(buffer);
+  for (let i = 0; i < chunks.length; i++) {
+    if (i > 0) Utilities.sleep(DISCORD_CHUNK_INTERVAL_MS);
+    postToDiscord(webhookUrl, chunks[i]);
+  }
 }
 
 /**
@@ -172,7 +186,7 @@ function postToDiscord(webhookUrl, content) {
   if (code < 200 || code >= 300) {
     const body = res.getContentText();
     const err = new Error(`Discord 送信エラー (${code}): ${body}`);
-    logError(err.message);
+    logError(`Discord 送信エラー (${code})`, err);
     throw err;
   }
 }
@@ -185,7 +199,7 @@ function installTrigger() {
   const triggers = ScriptApp.getProjectTriggers();
   const exists = triggers.some((t) => t.getHandlerFunction() === fn);
   if (!exists) {
-    ScriptApp.newTrigger(fn).timeBased().everyMinutes(5).create();
+    ScriptApp.newTrigger(fn).timeBased().everyMinutes(TRIGGER_INTERVAL_MINUTES).create();
   }
 }
 
@@ -195,6 +209,33 @@ function installTrigger() {
 function uninstallAllTriggers() {
   const triggers = ScriptApp.getProjectTriggers();
   for (const t of triggers) ScriptApp.deleteTrigger(t);
+}
+
+// ---- 通知済みキャッシュ管理 ----
+
+function loadNotifiedCache(props) {
+  try {
+    return JSON.parse(props.getProperty(PROP_KEYS.notifiedCache) || '{}');
+  } catch (_) {
+    return {};
+  }
+}
+
+function isAlreadyNotified(cache, ev) {
+  return Object.prototype.hasOwnProperty.call(cache, ev.id) && cache[ev.id] === ev.updated;
+}
+
+function markNotified(cache, ev) {
+  cache[ev.id] = ev.updated;
+}
+
+function saveNotifiedCache(props, cache) {
+  const entries = Object.entries(cache);
+  const trimmed =
+    entries.length > MAX_NOTIFIED_CACHE_ENTRIES
+      ? Object.fromEntries(entries.slice(entries.length - MAX_NOTIFIED_CACHE_ENTRIES))
+      : cache;
+  props.setProperty(PROP_KEYS.notifiedCache, JSON.stringify(trimmed));
 }
 
 function logInfo(message) {
