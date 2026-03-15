@@ -11,6 +11,7 @@ const CALENDAR_API_BASE = "https://www.googleapis.com/calendar/v3";
 const TRIGGER_INTERVAL_MINUTES = 5;
 const MAX_NOTIFIED_CACHE_ENTRIES = 200;
 const DISCORD_CHUNK_INTERVAL_MS = 1000; // レート制限対策: チャンク間待機 (ms)
+const DISCORD_MAX_RETRIES = 3;
 
 /**
  * 直近の更新差分を取得して Discord に通知
@@ -35,6 +36,8 @@ function pollCalendarAndNotify() {
     updates = fetchCalendarUpdates(calendarId, lastCheckedIso);
   } catch (err) {
     logError("Calendar API 呼び出しに失敗しました。設定や権限を確認してください。", err);
+    // エラー時も時刻を進めて長期間の重複通知を防ぐ
+    props.setProperty(PROP_KEYS.lastCheckedAt, nowIso);
     throw err;
   }
 
@@ -53,6 +56,7 @@ function pollCalendarAndNotify() {
       saveNotifiedCache(props, cache);
     } catch (err) {
       logError("Discord 送信処理でエラーが発生しました。Webhook URL を確認してください。", err);
+      // 通知に失敗した分はキャッシュに乗らないため時刻は更新しない
       throw err;
     }
   }
@@ -84,14 +88,14 @@ function computeLastCheckedDate(rawValue, now) {
   const floorMs = now.getTime() - DEFAULT_LOOKBACK_MS;
 
   if (!rawValue) {
-    return new Date(floorMs - SAFETY_OFFSET_MS);
+    return new Date(floorMs);
   }
 
   const parsed = new Date(rawValue);
   const parsedMs = parsed.getTime();
   if (Number.isNaN(parsedMs)) {
     logWarn(`LAST_CHECKED_AT (${rawValue}) が不正だったためリセットします。`);
-    return new Date(floorMs - SAFETY_OFFSET_MS);
+    return new Date(floorMs);
   }
 
   // SAFETY_OFFSET で少し巻き戻しつつ、古すぎる場合は floorMs でキャップ
@@ -158,14 +162,16 @@ function classifyChange(ev, lastCheckedIso) {
  */
 function postToDiscordInChunks(webhookUrl, messages) {
   const maxLen = 1800; // 余裕を持って分割
+  const sep = "\n\n";
   const chunks = [];
   let buffer = "";
   for (const msg of messages) {
-    if ((buffer + "\n\n" + msg).length > maxLen) {
+    const joined = buffer ? buffer + sep + msg : msg;
+    if (joined.length > maxLen) {
       if (buffer) chunks.push(buffer);
       buffer = msg;
     } else {
-      buffer = buffer ? buffer + "\n\n" + msg : msg;
+      buffer = joined;
     }
   }
   if (buffer) chunks.push(buffer);
@@ -176,7 +182,7 @@ function postToDiscordInChunks(webhookUrl, messages) {
 }
 
 /**
- * Discord Webhook へ送信
+ * Discord Webhook へ送信（429 時は Retry-After に従いリトライ）
  */
 function postToDiscord(webhookUrl, content) {
   const payload = { content };
@@ -186,9 +192,23 @@ function postToDiscord(webhookUrl, content) {
     payload: JSON.stringify(payload),
     muteHttpExceptions: true,
   };
-  const res = UrlFetchApp.fetch(webhookUrl, params);
-  const code = res.getResponseCode();
-  if (code < 200 || code >= 300) {
+
+  for (let attempt = 1; attempt <= DISCORD_MAX_RETRIES; attempt++) {
+    const res = UrlFetchApp.fetch(webhookUrl, params);
+    const code = res.getResponseCode();
+    if (code >= 200 && code < 300) return;
+
+    if (code === 429 && attempt < DISCORD_MAX_RETRIES) {
+      let waitMs = DISCORD_CHUNK_INTERVAL_MS * attempt;
+      try {
+        const body = JSON.parse(res.getContentText());
+        if (body.retry_after) waitMs = Math.ceil(body.retry_after * 1000);
+      } catch (_) {}
+      logWarn(`Discord レート制限 (429)。${waitMs}ms 後にリトライ (${attempt}/${DISCORD_MAX_RETRIES})`);
+      Utilities.sleep(waitMs);
+      continue;
+    }
+
     const body = res.getContentText();
     const err = new Error(`Discord 送信エラー (${code}): ${body}`);
     logError(`Discord 送信エラー (${code})`, err);
@@ -209,11 +229,13 @@ function installTrigger() {
 }
 
 /**
- * トリガーを全削除
+ * pollCalendarAndNotify のトリガーを削除
  */
 function uninstallAllTriggers() {
-  const triggers = ScriptApp.getProjectTriggers();
-  for (const t of triggers) ScriptApp.deleteTrigger(t);
+  const fn = "pollCalendarAndNotify";
+  ScriptApp.getProjectTriggers()
+    .filter((t) => t.getHandlerFunction() === fn)
+    .forEach((t) => ScriptApp.deleteTrigger(t));
 }
 
 // ---- 通知済みキャッシュ管理 ----
@@ -236,11 +258,14 @@ function markNotified(cache, ev) {
 
 function saveNotifiedCache(props, cache) {
   const entries = Object.entries(cache);
-  const trimmed =
-    entries.length > MAX_NOTIFIED_CACHE_ENTRIES
-      ? Object.fromEntries(entries.slice(entries.length - MAX_NOTIFIED_CACHE_ENTRIES))
-      : cache;
-  props.setProperty(PROP_KEYS.notifiedCache, JSON.stringify(trimmed));
+  if (entries.length > MAX_NOTIFIED_CACHE_ENTRIES) {
+    // updated 昇順ソートで古いエントリを優先削除
+    entries.sort((a, b) => (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
+    const trimmed = Object.fromEntries(entries.slice(entries.length - MAX_NOTIFIED_CACHE_ENTRIES));
+    props.setProperty(PROP_KEYS.notifiedCache, JSON.stringify(trimmed));
+  } else {
+    props.setProperty(PROP_KEYS.notifiedCache, JSON.stringify(cache));
+  }
 }
 
 function logInfo(message) {

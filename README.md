@@ -20,7 +20,7 @@
 
 ## 前提
 
-1. Node.js（最新版推奨）
+1. Node.js（最新版推奨、clasp の実行に必要）
 2. `bun add -g @google/clasp` でインストール
 3. `clasp login` で認証
 4. Discord 側で Webhook を作成し URL を控える
