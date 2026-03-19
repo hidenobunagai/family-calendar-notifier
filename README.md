@@ -20,8 +20,8 @@
 
 ## 前提
 
-1. Node.js（最新版推奨）
-2. `npm i -g @google/clasp` をインストール
+1. Node.js（最新版推奨、clasp の実行に必要）
+2. `bun add -g @google/clasp` でインストール
 3. `clasp login` で認証
 4. Discord 側で Webhook を作成し URL を控える
 5. 対象 Google カレンダーの ID を控える（カレンダーの設定 → カレンダーの統合）
@@ -53,6 +53,7 @@ clasp open
 - `CALENDAR_ID`: 対象のカレンダー ID
 - `DISCORD_WEBHOOK_URL`: Discord Webhook URL
 - `LAST_CHECKED_AT`: 任意（初回取りこぼし防止。未設定時は現在時刻から 6 時間巻き戻し）
+- `NOTIFIED_CACHE`: 自動管理（重複通知防止キャッシュ。手動設定不要）
 
 設定は Apps Script の「プロジェクトの設定」→「スクリプト プロパティ」から行うか、任意の一時関数で `PropertiesService.getScriptProperties().setProperty(key, value)` を実行してください。
 

@@ -1,23 +1,28 @@
 const PROP_KEYS = {
-  lastCheckedAt: 'LAST_CHECKED_AT',
-  calendarId: 'CALENDAR_ID',
-  webhookUrl: 'DISCORD_WEBHOOK_URL',
+  lastCheckedAt: "LAST_CHECKED_AT",
+  calendarId: "CALENDAR_ID",
+  webhookUrl: "DISCORD_WEBHOOK_URL",
+  notifiedCache: "NOTIFIED_CACHE",
 };
 
 const DEFAULT_LOOKBACK_MS = 6 * 60 * 60 * 1000; // 6 hours
 const SAFETY_OFFSET_MS = 60 * 1000; // rewind by 60 seconds to avoid misses
-const CALENDAR_API_BASE = 'https://www.googleapis.com/calendar/v3';
+const CALENDAR_API_BASE = "https://www.googleapis.com/calendar/v3";
+const TRIGGER_INTERVAL_MINUTES = 5;
+const MAX_NOTIFIED_CACHE_ENTRIES = 200;
+const DISCORD_CHUNK_INTERVAL_MS = 1000; // レート制限対策: チャンク間待機 (ms)
+const DISCORD_MAX_RETRIES = 3;
 
 /**
  * 直近の更新差分を取得して Discord に通知
  */
 function pollCalendarAndNotify() {
   const props = PropertiesService.getScriptProperties();
-  const calendarId = (props.getProperty(PROP_KEYS.calendarId) || '').trim();
-  const webhookUrl = (props.getProperty(PROP_KEYS.webhookUrl) || '').trim();
+  const calendarId = (props.getProperty(PROP_KEYS.calendarId) || "").trim();
+  const webhookUrl = (props.getProperty(PROP_KEYS.webhookUrl) || "").trim();
 
   if (!calendarId || !webhookUrl) {
-    logWarn('Script Properties に CALENDAR_ID / DISCORD_WEBHOOK_URL が未設定です。');
+    logWarn("Script Properties に CALENDAR_ID / DISCORD_WEBHOOK_URL が未設定です。");
     return;
   }
 
@@ -30,18 +35,28 @@ function pollCalendarAndNotify() {
   try {
     updates = fetchCalendarUpdates(calendarId, lastCheckedIso);
   } catch (err) {
-    logError('Calendar API 呼び出しに失敗しました。設定や権限を確認してください。', err);
+    logError("Calendar API 呼び出しに失敗しました。設定や権限を確認してください。", err);
+    // エラー時も時刻を進めて長期間の重複通知を防ぐ
+    props.setProperty(PROP_KEYS.lastCheckedAt, nowIso);
     throw err;
   }
 
-  logInfo(`Calendar diff: ${updates.length} updates since ${lastCheckedIso} -> ${nowIso}`);
-  if (updates.length) {
-    const tz = Session.getScriptTimeZone() || 'Asia/Tokyo';
-    const messages = updates.map(({ kind, ev }) => buildDiscordMessage(kind, ev, tz));
+  const cache = loadNotifiedCache(props);
+  const newUpdates = updates.filter(({ ev }) => !isAlreadyNotified(cache, ev));
+
+  logInfo(
+    `Calendar diff: ${updates.length} updates since ${lastCheckedIso} -> ${nowIso} (${newUpdates.length} new)`,
+  );
+  if (newUpdates.length) {
+    const tz = Session.getScriptTimeZone() || "Asia/Tokyo";
+    const messages = newUpdates.map(({ kind, ev }) => buildDiscordMessage(kind, ev, tz));
     try {
       postToDiscordInChunks(webhookUrl, messages);
+      newUpdates.forEach(({ ev }) => markNotified(cache, ev));
+      saveNotifiedCache(props, cache);
     } catch (err) {
-      logError('Discord 送信処理でエラーが発生しました。Webhook URL を確認してください。', err);
+      logError("Discord 送信処理でエラーが発生しました。Webhook URL を確認してください。", err);
+      // 通知に失敗した分はキャッシュに乗らないため時刻は更新しない
       throw err;
     }
   }
@@ -69,41 +84,44 @@ function fetchCalendarUpdates(calendarId, lastCheckedIso) {
 }
 
 function computeLastCheckedDate(rawValue, now) {
-  const fallback = now.getTime() - DEFAULT_LOOKBACK_MS;
+  // updatedMin が古すぎると Calendar API が 410 を返すため、最大遡り幅を DEFAULT_LOOKBACK_MS でキャップ
+  const floorMs = now.getTime() - DEFAULT_LOOKBACK_MS;
+
   if (!rawValue) {
-    return new Date(fallback - SAFETY_OFFSET_MS);
+    return new Date(floorMs);
   }
 
   const parsed = new Date(rawValue);
   const parsedMs = parsed.getTime();
   if (Number.isNaN(parsedMs)) {
     logWarn(`LAST_CHECKED_AT (${rawValue}) が不正だったためリセットします。`);
-    return new Date(fallback - SAFETY_OFFSET_MS);
+    return new Date(floorMs);
   }
 
-  const rewound = Math.max(parsedMs - SAFETY_OFFSET_MS, 0);
-  return new Date(rewound);
+  // SAFETY_OFFSET で少し巻き戻しつつ、古すぎる場合は floorMs でキャップ
+  const rewound = parsedMs - SAFETY_OFFSET_MS;
+  return new Date(Math.max(rewound, floorMs));
 }
 
 function listCalendarEvents(calendarId, updatedMin, pageToken) {
   const params = {
     updatedMin,
-    showDeleted: 'true',
-    singleEvents: 'false',
-    maxResults: '2500',
-    orderBy: 'updated',
+    showDeleted: "true",
+    singleEvents: "false",
+    maxResults: "2500",
+    orderBy: "updated",
   };
   if (pageToken) params.pageToken = pageToken;
 
   const query = Object.keys(params)
     .filter((key) => params[key])
     .map((key) => `${encodeURIComponent(key)}=${encodeURIComponent(params[key])}`)
-    .join('&');
+    .join("&");
 
-  const url = `${CALENDAR_API_BASE}/calendars/${encodeURIComponent(calendarId)}/events${query ? `?${query}` : ''}`;
+  const url = `${CALENDAR_API_BASE}/calendars/${encodeURIComponent(calendarId)}/events${query ? `?${query}` : ""}`;
 
   const res = UrlFetchApp.fetch(url, {
-    method: 'get',
+    method: "get",
     headers: { Authorization: `Bearer ${ScriptApp.getOAuthToken()}` },
     muteHttpExceptions: true,
   });
@@ -111,7 +129,7 @@ function listCalendarEvents(calendarId, updatedMin, pageToken) {
   const code = res.getResponseCode();
   const text = res.getContentText();
   if (code >= 200 && code < 300) {
-    return JSON.parse(text || '{}');
+    return JSON.parse(text || "{}");
   }
 
   let message = `Calendar API error (status ${code})`;
@@ -133,9 +151,9 @@ function classifyChange(ev, lastCheckedIso) {
   const lastCheckedMs = new Date(lastCheckedIso).getTime();
   const createdMs = ev.created ? new Date(ev.created).getTime() : 0;
   const updatedMs = ev.updated ? new Date(ev.updated).getTime() : 0;
-  if (ev.status === 'cancelled') return 'キャンセル';
-  if (createdMs > lastCheckedMs) return '新規';
-  if (updatedMs > lastCheckedMs) return '更新';
+  if (ev.status === "cancelled") return "キャンセル";
+  if (createdMs > lastCheckedMs) return "新規";
+  if (updatedMs > lastCheckedMs) return "更新";
   return null;
 }
 
@@ -144,18 +162,26 @@ function classifyChange(ev, lastCheckedIso) {
  */
 function postToDiscordInChunks(webhookUrl, messages) {
   const maxLen = 1800; // 余裕を持って分割
-  let buffer = '';
+  const sep = "\n\n";
+  const chunks = [];
+  let buffer = "";
   for (const rawMsg of messages) {
     const msg = normalizeDiscordMessage(rawMsg, maxLen);
     if (!msg) continue;
-    if ((buffer + '\n\n' + msg).length > maxLen) {
-      if (buffer) postToDiscord(webhookUrl, buffer);
+
+    const joined = buffer ? buffer + sep + msg : msg;
+    if (joined.length > maxLen) {
+      if (buffer) chunks.push(buffer);
       buffer = msg;
     } else {
-      buffer = buffer ? buffer + '\n\n' + msg : msg;
+      buffer = joined;
     }
   }
-  if (buffer) postToDiscord(webhookUrl, buffer);
+  if (buffer) chunks.push(buffer);
+  for (let i = 0; i < chunks.length; i++) {
+    if (i > 0) Utilities.sleep(DISCORD_CHUNK_INTERVAL_MS);
+    postToDiscord(webhookUrl, chunks[i]);
+  }
 }
 
 function normalizeDiscordMessage(message, maxLen) {
@@ -167,22 +193,36 @@ function normalizeDiscordMessage(message, maxLen) {
 }
 
 /**
- * Discord Webhook へ送信
+ * Discord Webhook へ送信（429 時は Retry-After に従いリトライ）
  */
 function postToDiscord(webhookUrl, content) {
   const payload = { content };
   const params = {
-    method: 'post',
-    contentType: 'application/json',
+    method: "post",
+    contentType: "application/json",
     payload: JSON.stringify(payload),
     muteHttpExceptions: true,
   };
-  const res = UrlFetchApp.fetch(webhookUrl, params);
-  const code = res.getResponseCode();
-  if (code < 200 || code >= 300) {
+
+  for (let attempt = 1; attempt <= DISCORD_MAX_RETRIES; attempt++) {
+    const res = UrlFetchApp.fetch(webhookUrl, params);
+    const code = res.getResponseCode();
+    if (code >= 200 && code < 300) return;
+
+    if (code === 429 && attempt < DISCORD_MAX_RETRIES) {
+      let waitMs = DISCORD_CHUNK_INTERVAL_MS * attempt;
+      try {
+        const body = JSON.parse(res.getContentText());
+        if (body.retry_after) waitMs = Math.ceil(body.retry_after * 1000);
+      } catch (_) {}
+      logWarn(`Discord レート制限 (429)。${waitMs}ms 後にリトライ (${attempt}/${DISCORD_MAX_RETRIES})`);
+      Utilities.sleep(waitMs);
+      continue;
+    }
+
     const body = res.getContentText();
     const err = new Error(`Discord 送信エラー (${code}): ${body}`);
-    logError(err.message);
+    logError(`Discord 送信エラー (${code})`, err);
     throw err;
   }
 }
@@ -191,20 +231,52 @@ function postToDiscord(webhookUrl, content) {
  * 5分毎の時間主導トリガーを作成
  */
 function installTrigger() {
-  const fn = 'pollCalendarAndNotify';
+  const fn = "pollCalendarAndNotify";
   const triggers = ScriptApp.getProjectTriggers();
   const exists = triggers.some((t) => t.getHandlerFunction() === fn);
   if (!exists) {
-    ScriptApp.newTrigger(fn).timeBased().everyMinutes(5).create();
+    ScriptApp.newTrigger(fn).timeBased().everyMinutes(TRIGGER_INTERVAL_MINUTES).create();
   }
 }
 
 /**
- * トリガーを全削除
+ * pollCalendarAndNotify のトリガーを削除
  */
 function uninstallAllTriggers() {
-  const triggers = ScriptApp.getProjectTriggers();
-  for (const t of triggers) ScriptApp.deleteTrigger(t);
+  const fn = "pollCalendarAndNotify";
+  ScriptApp.getProjectTriggers()
+    .filter((t) => t.getHandlerFunction() === fn)
+    .forEach((t) => ScriptApp.deleteTrigger(t));
+}
+
+// ---- 通知済みキャッシュ管理 ----
+
+function loadNotifiedCache(props) {
+  try {
+    return JSON.parse(props.getProperty(PROP_KEYS.notifiedCache) || "{}");
+  } catch (_) {
+    return {};
+  }
+}
+
+function isAlreadyNotified(cache, ev) {
+  return Object.prototype.hasOwnProperty.call(cache, ev.id) && cache[ev.id] === ev.updated;
+}
+
+function markNotified(cache, ev) {
+  cache[ev.id] = ev.updated;
+}
+
+function saveNotifiedCache(props, cache) {
+  const entries = Object.entries(cache);
+  if (entries.length > MAX_NOTIFIED_CACHE_ENTRIES) {
+    // updated 昇順ソートで古いエントリを優先削除
+    entries.sort((a, b) => (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
+    const trimmed = Object.fromEntries(entries.slice(entries.length - MAX_NOTIFIED_CACHE_ENTRIES));
+    props.setProperty(PROP_KEYS.notifiedCache, JSON.stringify(trimmed));
+  } else {
+    props.setProperty(PROP_KEYS.notifiedCache, JSON.stringify(cache));
+  }
 }
 
 function logInfo(message) {
