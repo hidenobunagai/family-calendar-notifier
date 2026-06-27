@@ -2,7 +2,11 @@ const PROP_KEYS = {
   lastCheckedAt: "LAST_CHECKED_AT",
   calendarId: "CALENDAR_ID",
   webhookUrl: "DISCORD_WEBHOOK_URL",
+  lineChannelAccessToken: "LINE_CHANNEL_ACCESS_TOKEN",
+  lineTargetId: "LINE_TARGET_ID",
   notifiedCache: "NOTIFIED_CACHE",
+  lock: "LOCK",
+  debugMode: "DEBUG_MODE",
 };
 
 const DEFAULT_LOOKBACK_MS = 6 * 60 * 60 * 1000; // 6 hours
@@ -12,56 +16,128 @@ const TRIGGER_INTERVAL_MINUTES = 5;
 const MAX_NOTIFIED_CACHE_ENTRIES = 200;
 const DISCORD_CHUNK_INTERVAL_MS = 1000; // レート制限対策: チャンク間待機 (ms)
 const DISCORD_MAX_RETRIES = 3;
+const LOCK_TIMEOUT_MS = 10 * 60 * 1000; // ロックの有効期限 (10分)
+const CALENDAR_API_MAX_RETRIES = 3;
+// LINE Messaging API 関連 (LINE Notify は 2025/3 廃止のため非採用)
+const LINE_PUSH_URL = "https://api.line.me/v2/bot/message/push";
+const LINE_MAX_RETRIES = 3;
+const LINE_MAX_TEXT_LENGTH = 5000; // 1メッセージあたりの文字数上限
+const LINE_MAX_MESSAGES_PER_PUSH = 5; // 1 push あたりのメッセージ数上限
+const LINE_CHUNK_INTERVAL_MS = 1000; // レート制限対策: push 間待機 (ms)
 
 /**
- * 直近の更新差分を取得して Discord に通知
+ * 直近の更新差分を取得して Discord / LINE に通知
+ * - Discord: DISCORD_WEBHOOK_URL が設定されている場合のみ送信
+ * - LINE: LINE_CHANNEL_ACCESS_TOKEN + LINE_TARGET_ID が両方設定されている場合のみ送信
+ * どちらも未設定の場合は警告して中断。いずれか1つでも送信成功すれば通知済みキャッシュに記録。
  */
 function pollCalendarAndNotify() {
   const props = PropertiesService.getScriptProperties();
-  const calendarId = (props.getProperty(PROP_KEYS.calendarId) || "").trim();
-  const webhookUrl = (props.getProperty(PROP_KEYS.webhookUrl) || "").trim();
 
-  if (!calendarId || !webhookUrl) {
-    logWarn("Script Properties に CALENDAR_ID / DISCORD_WEBHOOK_URL が未設定です。");
+  // 実行ロックを取得（取得できなければスキップ）
+  if (!acquireLock(props)) {
+    logInfo("前回の実行が継続中のためスキップします。");
     return;
   }
 
-  const now = new Date();
-  const nowIso = now.toISOString();
-  const lastCheckedDate = computeLastCheckedDate(props.getProperty(PROP_KEYS.lastCheckedAt), now);
-  const lastCheckedIso = lastCheckedDate.toISOString();
-
-  let updates;
   try {
-    updates = fetchCalendarUpdates(calendarId, lastCheckedIso);
-  } catch (err) {
-    logError("Calendar API 呼び出しに失敗しました。設定や権限を確認してください。", err);
-    // エラー時も時刻を進めて長期間の重複通知を防ぐ
-    props.setProperty(PROP_KEYS.lastCheckedAt, nowIso);
-    throw err;
-  }
+    const calendarId = (props.getProperty(PROP_KEYS.calendarId) || "").trim();
+    const webhookUrl = (props.getProperty(PROP_KEYS.webhookUrl) || "").trim();
+    const lineChannelAccessToken = (
+      props.getProperty(PROP_KEYS.lineChannelAccessToken) || ""
+    ).trim();
+    const lineTargetId = (props.getProperty(PROP_KEYS.lineTargetId) || "").trim();
 
-  const cache = loadNotifiedCache(props);
-  const newUpdates = updates.filter(({ ev }) => !isAlreadyNotified(cache, ev));
+    const hasDiscord = !!calendarId && !!webhookUrl;
+    const hasLine = !!lineChannelAccessToken && !!lineTargetId;
 
-  logInfo(
-    `Calendar diff: ${updates.length} updates since ${lastCheckedIso} -> ${nowIso} (${newUpdates.length} new)`,
-  );
-  if (newUpdates.length) {
-    const tz = Session.getScriptTimeZone() || "Asia/Tokyo";
-    const messages = newUpdates.map(({ kind, ev }) => buildDiscordMessage(kind, ev, tz));
+    if (!calendarId) {
+      logWarn("Script Properties に CALENDAR_ID が未設定です。");
+      return;
+    }
+    if (!hasDiscord && !hasLine) {
+      logWarn(
+        "Script Properties に通知先が未設定です。DISCORD_WEBHOOK_URL または LINE_CHANNEL_ACCESS_TOKEN + LINE_TARGET_ID を設定してください。",
+      );
+      return;
+    }
+
+    const now = new Date();
+    const nowIso = now.toISOString();
+    const lastCheckedDate = computeLastCheckedDate(props.getProperty(PROP_KEYS.lastCheckedAt), now);
+    const lastCheckedIso = lastCheckedDate.toISOString();
+
+    let updates;
     try {
-      postToDiscordInChunks(webhookUrl, messages);
-      newUpdates.forEach(({ ev }) => markNotified(cache, ev));
-      saveNotifiedCache(props, cache);
+      updates = fetchCalendarUpdates(calendarId, lastCheckedIso);
     } catch (err) {
-      logError("Discord 送信処理でエラーが発生しました。Webhook URL を確認してください。", err);
-      // 通知に失敗した分はキャッシュに乗らないため時刻は更新しない
+      logError("Calendar API 呼び出しに失敗しました。設定や権限を確認してください。", err);
+      // エラー時も時刻を進めて長期間の重複通知を防ぐ
+      props.setProperty(PROP_KEYS.lastCheckedAt, nowIso);
       throw err;
     }
-  }
 
-  props.setProperty(PROP_KEYS.lastCheckedAt, nowIso);
+    const cache = loadNotifiedCache(props);
+    const newUpdates = updates.filter(({ ev }) => !isAlreadyNotified(cache, ev));
+
+    logInfo(
+      `Calendar diff: ${updates.length} updates since ${lastCheckedIso} -> ${nowIso} (${newUpdates.length} new)`,
+    );
+    if (newUpdates.length) {
+      const tz = Session.getScriptTimeZone() || "Asia/Tokyo";
+      const messages = newUpdates.map(({ kind, ev }) => buildMessage(kind, ev, tz));
+      if (isDebugMode(props)) {
+        const channels = [];
+        if (hasDiscord) channels.push("Discord");
+        if (hasLine) channels.push("LINE");
+        logInfo(
+          `[DRY-RUN] 以下の ${messages.length} 件を ${channels.join(" / ")} へ送信予定（DEBUG_MODE=ON）:\n${messages.join("\n---\n")}`,
+        );
+        // ドライラン時もキャッシュに記録して重複通知を防ぐ
+        newUpdates.forEach(({ ev }) => markNotified(cache, ev));
+        saveNotifiedCache(props, cache);
+      } else {
+        let discordOk = !hasDiscord; // 送信不要なら成功扱い
+        let lineOk = !hasLine;
+
+        if (hasDiscord) {
+          try {
+            postToDiscordInChunks(webhookUrl, messages);
+          } catch (err) {
+            logError(
+              "Discord 送信処理でエラーが発生しました。Webhook URL を確認してください。",
+              err,
+            );
+            discordOk = false;
+          }
+        }
+
+        if (hasLine) {
+          try {
+            postToLineInChunks(lineChannelAccessToken, lineTargetId, messages);
+          } catch (err) {
+            logError(
+              "LINE 送信処理でエラーが発生しました。アクセストークン / ターゲット ID を確認してください。",
+              err,
+            );
+            lineOk = false;
+          }
+        }
+
+        // いずれか一方でも送信成功すれば通知済みとして記録
+        if (discordOk || lineOk) {
+          newUpdates.forEach(({ ev }) => markNotified(cache, ev));
+          saveNotifiedCache(props, cache);
+        } else {
+          throw new Error("Discord / LINE 両方の送信に失敗しました。");
+        }
+      }
+    }
+
+    props.setProperty(PROP_KEYS.lastCheckedAt, nowIso);
+  } finally {
+    releaseLock(props);
+  }
 }
 
 function fetchCalendarUpdates(calendarId, lastCheckedIso) {
@@ -69,7 +145,9 @@ function fetchCalendarUpdates(calendarId, lastCheckedIso) {
   let pageToken = null;
 
   do {
-    const res = listCalendarEvents(calendarId, lastCheckedIso, pageToken);
+    const res = callCalendarApiWithRetry(() =>
+      listCalendarEvents(calendarId, lastCheckedIso, pageToken),
+    );
     if (res.items && res.items.length) {
       for (const ev of res.items) {
         const kind = classifyChange(ev, lastCheckedIso);
@@ -81,6 +159,54 @@ function fetchCalendarUpdates(calendarId, lastCheckedIso) {
   } while (pageToken);
 
   return updates;
+}
+
+// ---- 実行ロック（トリガー重複防止） ----
+
+function acquireLock(props) {
+  const now = Date.now();
+  const lockRaw = props.getProperty(PROP_KEYS.lock);
+  if (lockRaw) {
+    try {
+      const lock = JSON.parse(lockRaw);
+      if (lock.startedAt && now - lock.startedAt < LOCK_TIMEOUT_MS) {
+        return false; // 有効なロックが存在
+      }
+    } catch (_) {
+      // ロックデータが破損している場合は上書き許可
+    }
+  }
+  props.setProperty(PROP_KEYS.lock, JSON.stringify({ running: true, startedAt: now }));
+  return true;
+}
+
+function releaseLock(props) {
+  props.deleteProperty(PROP_KEYS.lock);
+}
+
+function isDebugMode(props) {
+  return (props.getProperty(PROP_KEYS.debugMode) || "").toLowerCase() === "true";
+}
+
+// ---- Calendar API リトライ ----
+
+function callCalendarApiWithRetry(fn) {
+  let lastError;
+  for (let attempt = 1; attempt <= CALENDAR_API_MAX_RETRIES; attempt++) {
+    try {
+      return fn();
+    } catch (err) {
+      lastError = err;
+      if (attempt < CALENDAR_API_MAX_RETRIES) {
+        const waitMs = 1000 * attempt;
+        logWarn(
+          `Calendar API 呼び出し失敗。${waitMs}ms 後にリトライ (${attempt}/${CALENDAR_API_MAX_RETRIES})`,
+        );
+        Utilities.sleep(waitMs);
+      }
+    }
+  }
+  throw lastError;
 }
 
 function computeLastCheckedDate(rawValue, now) {
@@ -185,9 +311,9 @@ function postToDiscordInChunks(webhookUrl, messages) {
 }
 
 function normalizeDiscordMessage(message, maxLen) {
-  if (!message) return '';
+  if (!message) return "";
   if (message.length <= maxLen) return message;
-  const ellipsis = '…';
+  const ellipsis = "…";
   const limit = Math.max(maxLen - ellipsis.length, 0);
   return `${message.slice(0, limit)}${ellipsis}`;
 }
@@ -215,7 +341,9 @@ function postToDiscord(webhookUrl, content) {
         const body = JSON.parse(res.getContentText());
         if (body.retry_after) waitMs = Math.ceil(body.retry_after * 1000);
       } catch (_) {}
-      logWarn(`Discord レート制限 (429)。${waitMs}ms 後にリトライ (${attempt}/${DISCORD_MAX_RETRIES})`);
+      logWarn(
+        `Discord レート制限 (429)。${waitMs}ms 後にリトライ (${attempt}/${DISCORD_MAX_RETRIES})`,
+      );
       Utilities.sleep(waitMs);
       continue;
     }
@@ -223,6 +351,101 @@ function postToDiscord(webhookUrl, content) {
     const body = res.getContentText();
     const err = new Error(`Discord 送信エラー (${code}): ${body}`);
     logError(`Discord 送信エラー (${code})`, err);
+    throw err;
+  }
+}
+
+/**
+ * LINE Messaging API へのメッセージ送信 (push) をチャンク分割で実行
+ * @param {string} channelAccessToken LINE_CHANNEL_ACCESS_TOKEN
+ * @param {string} targetId LINE_TARGET_ID (ユーザー/グループ/トークルーム ID)
+ * @param {string[]} messages 各更新の通知メッセージ配列
+ */
+function postToLineInChunks(channelAccessToken, targetId, messages) {
+  const sep = "\n\n";
+  const chunks = [];
+  let buffer = "";
+  for (const rawMsg of messages) {
+    const msg = normalizeLineMessage(rawMsg, LINE_MAX_TEXT_LENGTH);
+    if (!msg) continue;
+
+    const joined = buffer ? buffer + sep + msg : msg;
+    // LINE_MAX_TEXT_LENGTH を超える場合は新しいチャンクへ
+    if (joined.length > LINE_MAX_TEXT_LENGTH) {
+      if (buffer) chunks.push(buffer);
+      buffer = msg;
+    } else {
+      buffer = joined;
+    }
+  }
+  if (buffer) chunks.push(buffer);
+
+  // LINE_MAX_MESSAGES_PER_PUSH 件ずつ 1 push にまとめて送信
+  for (let i = 0; i < chunks.length; i += LINE_MAX_MESSAGES_PER_PUSH) {
+    if (i > 0) Utilities.sleep(LINE_CHUNK_INTERVAL_MS);
+    const batch = chunks.slice(i, i + LINE_MAX_MESSAGES_PER_PUSH);
+    postToLine(channelAccessToken, targetId, batch);
+  }
+}
+
+/**
+ * LINE メッセージを LINE_MAX_TEXT_LENGTH に収まるよう丸める
+ */
+function normalizeLineMessage(message, maxLen) {
+  if (!message) return "";
+  if (message.length <= maxLen) return message;
+  const ellipsis = "…";
+  const limit = Math.max(maxLen - ellipsis.length, 0);
+  return `${message.slice(0, limit)}${ellipsis}`;
+}
+
+/**
+ * LINE Messaging API の push エンドポイントへ送信（429 時は Retry-After に従いリトライ）
+ * @param {string} channelAccessToken
+ * @param {string} targetId
+ * @param {string[]} messageTexts 1 push に含めるテキストメッセージ配列 (最大 LINE_MAX_MESSAGES_PER_PUSH)
+ */
+function postToLine(channelAccessToken, targetId, messageTexts) {
+  const payload = {
+    to: targetId,
+    messages: messageTexts.map((text) => ({ type: "text", text })),
+  };
+  const params = {
+    method: "post",
+    contentType: "application/json",
+    headers: { Authorization: `Bearer ${channelAccessToken}` },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true,
+  };
+
+  for (let attempt = 1; attempt <= LINE_MAX_RETRIES; attempt++) {
+    const res = UrlFetchApp.fetch(LINE_PUSH_URL, params);
+    const code = res.getResponseCode();
+    if (code >= 200 && code < 300) return;
+
+    // 401 (認証エラー) / 400 (リクエスト不正) はリトライせず即時例外
+    if (code === 401 || code === 400) {
+      const body = res.getContentText();
+      const err = new Error(`LINE 認証/リクエストエラー (${code}): ${body}`);
+      logError(`LINE 送信エラー (${code}) - アクセストークン/ターゲットIDを確認してください`, err);
+      throw err;
+    }
+
+    if (code === 429 && attempt < LINE_MAX_RETRIES) {
+      let waitMs = LINE_CHUNK_INTERVAL_MS * attempt;
+      const retryAfter = res.getHeaders()["Retry-After"];
+      if (retryAfter) {
+        const parsed = parseInt(retryAfter, 10);
+        if (!Number.isNaN(parsed)) waitMs = parsed * 1000;
+      }
+      logWarn(`LINE レート制限 (429)。${waitMs}ms 後にリトライ (${attempt}/${LINE_MAX_RETRIES})`);
+      Utilities.sleep(waitMs);
+      continue;
+    }
+
+    const body = res.getContentText();
+    const err = new Error(`LINE 送信エラー (${code}): ${body}`);
+    logError(`LINE 送信エラー (${code})`, err);
     throw err;
   }
 }
@@ -271,7 +494,7 @@ function saveNotifiedCache(props, cache) {
   const entries = Object.entries(cache);
   if (entries.length > MAX_NOTIFIED_CACHE_ENTRIES) {
     // updated 昇順ソートで古いエントリを優先削除
-    entries.sort((a, b) => (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
+    entries.sort((a, b) => String(a[1]).localeCompare(String(b[1])));
     const trimmed = Object.fromEntries(entries.slice(entries.length - MAX_NOTIFIED_CACHE_ENTRIES));
     props.setProperty(PROP_KEYS.notifiedCache, JSON.stringify(trimmed));
   } else {
