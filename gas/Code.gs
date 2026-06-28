@@ -127,9 +127,11 @@ function pollCalendarAndNotify() {
         // いずれか一方でも送信成功すれば通知済みとして記録
         if (discordOk || lineOk) {
           newUpdates.forEach(({ ev }) => markNotified(cache, ev));
-          saveNotifiedCache(props, cache);
-        } else {
-          throw new Error("Discord / LINE 両方の送信に失敗しました。");
+        }
+        // 重複通知防止のため、成否にかかわらずキャッシュを保存
+        saveNotifiedCache(props, cache);
+        if (!discordOk && !lineOk) {
+          logError("Discord / LINE 両方の送信に失敗しました。");
         }
       }
     }
@@ -353,6 +355,7 @@ function postToDiscord(webhookUrl, content) {
     logError(`Discord 送信エラー (${code})`, err);
     throw err;
   }
+  throw new Error("Discord 送信エラー: リトライ上限に達しました (429)");
 }
 
 /**
@@ -448,6 +451,7 @@ function postToLine(channelAccessToken, targetId, messageTexts) {
     logError(`LINE 送信エラー (${code})`, err);
     throw err;
   }
+  throw new Error("LINE 送信エラー: リトライ上限に達しました (429)");
 }
 
 /**
