@@ -27,6 +27,15 @@ function buildTimeText(ev, tz) {
   const fmt = (d) => Utilities.formatDate(d, tz, "yyyy/MM/dd(EEE) HH:mm");
   const allDayFmt = (d) => Utilities.formatDate(d, tz, "yyyy/MM/dd(EEE)");
 
+  // キャンセルされた繰り返しインスタンスは start/end を含まず、
+  // originalStartTime にのみ日時が入る (Calendar API の仕様)
+  if (ev.status === "cancelled" && ev.originalStartTime) {
+    const ost = ev.originalStartTime;
+    if (ost.date) return `${allDayFmt(new Date(ost.date))} (終日)`;
+    if (ost.dateTime) return `${fmt(new Date(ost.dateTime))} 〜`;
+    return "";
+  }
+
   if (ev.start && ev.start.date) {
     if (ev.end && ev.end.date) {
       const s = new Date(ev.start.date);
