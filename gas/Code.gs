@@ -5,9 +5,10 @@ const PROP_KEYS = {
   lineChannelAccessToken: "LINE_CHANNEL_ACCESS_TOKEN",
   lineTargetId: "LINE_TARGET_ID",
   notifiedCache: "NOTIFIED_CACHE",
-  lock: "LOCK",
   debugMode: "DEBUG_MODE",
 };
+
+const HANDLER = "pollCalendarAndNotify"; // トリガーで実行する関数名
 
 const DEFAULT_LOOKBACK_MS = 6 * 60 * 60 * 1000; // 6 hours
 const SAFETY_OFFSET_MS = 60 * 1000; // rewind by 60 seconds to avoid misses
@@ -34,8 +35,9 @@ const LINE_CHUNK_INTERVAL_MS = 1000; // レート制限対策: push 間待機 (m
 function pollCalendarAndNotify() {
   const props = PropertiesService.getScriptProperties();
 
-  // 実行ロックを取得（取得できなければスキップ）
-  if (!acquireLock(props)) {
+  // 実行ロックを取得（取得できなければスキップ）。標準の LockService を使用。
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(LOCK_TIMEOUT_MS)) {
     logInfo("前回の実行が継続中のためスキップします。");
     return;
   }
@@ -138,7 +140,7 @@ function pollCalendarAndNotify() {
 
     props.setProperty(PROP_KEYS.lastCheckedAt, nowIso);
   } finally {
-    releaseLock(props);
+    lock.releaseLock();
   }
 }
 
@@ -147,9 +149,7 @@ function fetchCalendarUpdates(calendarId, lastCheckedIso) {
   let pageToken = null;
 
   do {
-    const res = callCalendarApiWithRetry(() =>
-      listCalendarEvents(calendarId, lastCheckedIso, pageToken),
-    );
+    const res = listCalendarEvents(calendarId, lastCheckedIso, pageToken);
     if (res.items && res.items.length) {
       for (const ev of res.items) {
         const kind = classifyChange(ev, lastCheckedIso);
@@ -163,53 +163,11 @@ function fetchCalendarUpdates(calendarId, lastCheckedIso) {
   return updates;
 }
 
-// ---- 実行ロック（トリガー重複防止） ----
-
-function acquireLock(props) {
-  const now = Date.now();
-  const lockRaw = props.getProperty(PROP_KEYS.lock);
-  if (lockRaw) {
-    try {
-      const lock = JSON.parse(lockRaw);
-      if (lock.startedAt && now - lock.startedAt < LOCK_TIMEOUT_MS) {
-        return false; // 有効なロックが存在
-      }
-    } catch (_) {
-      // ロックデータが破損している場合は上書き許可
-    }
-  }
-  props.setProperty(PROP_KEYS.lock, JSON.stringify({ running: true, startedAt: now }));
-  return true;
-}
-
-function releaseLock(props) {
-  props.deleteProperty(PROP_KEYS.lock);
-}
-
 function isDebugMode(props) {
   return (props.getProperty(PROP_KEYS.debugMode) || "").toLowerCase() === "true";
 }
 
-// ---- Calendar API リトライ ----
-
-function callCalendarApiWithRetry(fn) {
-  let lastError;
-  for (let attempt = 1; attempt <= CALENDAR_API_MAX_RETRIES; attempt++) {
-    try {
-      return fn();
-    } catch (err) {
-      lastError = err;
-      if (attempt < CALENDAR_API_MAX_RETRIES) {
-        const waitMs = 1000 * attempt;
-        logWarn(
-          `Calendar API 呼び出し失敗。${waitMs}ms 後にリトライ (${attempt}/${CALENDAR_API_MAX_RETRIES})`,
-        );
-        Utilities.sleep(waitMs);
-      }
-    }
-  }
-  throw lastError;
-}
+// ---- Calendar API ----
 
 function computeLastCheckedDate(rawValue, now) {
   // updatedMin が古すぎると Calendar API が 410 を返すため、最大遡り幅を DEFAULT_LOOKBACK_MS でキャップ
@@ -248,28 +206,40 @@ function listCalendarEvents(calendarId, updatedMin, pageToken) {
 
   const url = `${CALENDAR_API_BASE}/calendars/${encodeURIComponent(calendarId)}/events${query ? `?${query}` : ""}`;
 
-  const res = UrlFetchApp.fetch(url, {
-    method: "get",
-    headers: { Authorization: `Bearer ${ScriptApp.getOAuthToken()}` },
-    muteHttpExceptions: true,
-  });
+  let lastError;
+  for (let attempt = 1; attempt <= CALENDAR_API_MAX_RETRIES; attempt++) {
+    const res = UrlFetchApp.fetch(url, {
+      method: "get",
+      headers: { Authorization: `Bearer ${ScriptApp.getOAuthToken()}` },
+      muteHttpExceptions: true,
+    });
 
-  const code = res.getResponseCode();
-  const text = res.getContentText();
-  if (code >= 200 && code < 300) {
-    return JSON.parse(text || "{}");
-  }
-
-  let message = `Calendar API error (status ${code})`;
-  try {
-    const body = JSON.parse(text);
-    if (body && body.error && body.error.message) {
-      message += `: ${body.error.message}`;
+    const code = res.getResponseCode();
+    const text = res.getContentText();
+    if (code >= 200 && code < 300) {
+      return JSON.parse(text || "{}");
     }
-  } catch (parseErr) {
-    message += `: ${text}`;
+
+    let message = `Calendar API error (status ${code})`;
+    try {
+      const body = JSON.parse(text);
+      if (body && body.error && body.error.message) {
+        message += `: ${body.error.message}`;
+      }
+    } catch (parseErr) {
+      message += `: ${text}`;
+    }
+    lastError = new Error(message);
+
+    if (attempt < CALENDAR_API_MAX_RETRIES) {
+      const waitMs = 1000 * attempt;
+      logWarn(
+        `Calendar API 呼び出し失敗。${waitMs}ms 後にリトライ (${attempt}/${CALENDAR_API_MAX_RETRIES})`,
+      );
+      Utilities.sleep(waitMs);
+    }
   }
-  throw new Error(message);
+  throw lastError;
 }
 
 /**
@@ -286,15 +256,14 @@ function classifyChange(ev, lastCheckedIso) {
 }
 
 /**
- * Discord メッセージを分割送信
+ * メッセージを maxLen ごとに分割（sep で結合し、maxLen 超過で新チャンクへ）。
+ * 各メッセージは truncateMessage で maxLen に丸める。
  */
-function postToDiscordInChunks(webhookUrl, messages) {
-  const maxLen = 1800; // 余裕を持って分割
-  const sep = "\n\n";
+function chunkMessages(messages, sep, maxLen) {
   const chunks = [];
   let buffer = "";
   for (const rawMsg of messages) {
-    const msg = normalizeDiscordMessage(rawMsg, maxLen);
+    const msg = truncateMessage(rawMsg, maxLen);
     if (!msg) continue;
 
     const joined = buffer ? buffer + sep + msg : msg;
@@ -306,18 +275,18 @@ function postToDiscordInChunks(webhookUrl, messages) {
     }
   }
   if (buffer) chunks.push(buffer);
+  return chunks;
+}
+
+/**
+ * Discord メッセージを分割送信
+ */
+function postToDiscordInChunks(webhookUrl, messages) {
+  const chunks = chunkMessages(messages, "\n\n", 1800);
   for (let i = 0; i < chunks.length; i++) {
     if (i > 0) Utilities.sleep(DISCORD_CHUNK_INTERVAL_MS);
     postToDiscord(webhookUrl, chunks[i]);
   }
-}
-
-function normalizeDiscordMessage(message, maxLen) {
-  if (!message) return "";
-  if (message.length <= maxLen) return message;
-  const ellipsis = "…";
-  const limit = Math.max(maxLen - ellipsis.length, 0);
-  return `${message.slice(0, limit)}${ellipsis}`;
 }
 
 /**
@@ -365,41 +334,13 @@ function postToDiscord(webhookUrl, content) {
  * @param {string[]} messages 各更新の通知メッセージ配列
  */
 function postToLineInChunks(channelAccessToken, targetId, messages) {
-  const sep = "\n\n";
-  const chunks = [];
-  let buffer = "";
-  for (const rawMsg of messages) {
-    const msg = normalizeLineMessage(rawMsg, LINE_MAX_TEXT_LENGTH);
-    if (!msg) continue;
-
-    const joined = buffer ? buffer + sep + msg : msg;
-    // LINE_MAX_TEXT_LENGTH を超える場合は新しいチャンクへ
-    if (joined.length > LINE_MAX_TEXT_LENGTH) {
-      if (buffer) chunks.push(buffer);
-      buffer = msg;
-    } else {
-      buffer = joined;
-    }
-  }
-  if (buffer) chunks.push(buffer);
-
+  const chunks = chunkMessages(messages, "\n\n", LINE_MAX_TEXT_LENGTH);
   // LINE_MAX_MESSAGES_PER_PUSH 件ずつ 1 push にまとめて送信
   for (let i = 0; i < chunks.length; i += LINE_MAX_MESSAGES_PER_PUSH) {
     if (i > 0) Utilities.sleep(LINE_CHUNK_INTERVAL_MS);
     const batch = chunks.slice(i, i + LINE_MAX_MESSAGES_PER_PUSH);
     postToLine(channelAccessToken, targetId, batch);
   }
-}
-
-/**
- * LINE メッセージを LINE_MAX_TEXT_LENGTH に収まるよう丸める
- */
-function normalizeLineMessage(message, maxLen) {
-  if (!message) return "";
-  if (message.length <= maxLen) return message;
-  const ellipsis = "…";
-  const limit = Math.max(maxLen - ellipsis.length, 0);
-  return `${message.slice(0, limit)}${ellipsis}`;
 }
 
 /**
@@ -458,11 +399,10 @@ function postToLine(channelAccessToken, targetId, messageTexts) {
  * 5分毎の時間主導トリガーを作成
  */
 function installTrigger() {
-  const fn = "pollCalendarAndNotify";
   const triggers = ScriptApp.getProjectTriggers();
-  const exists = triggers.some((t) => t.getHandlerFunction() === fn);
+  const exists = triggers.some((t) => t.getHandlerFunction() === HANDLER);
   if (!exists) {
-    ScriptApp.newTrigger(fn).timeBased().everyMinutes(TRIGGER_INTERVAL_MINUTES).create();
+    ScriptApp.newTrigger(HANDLER).timeBased().everyMinutes(TRIGGER_INTERVAL_MINUTES).create();
   }
 }
 
@@ -470,9 +410,8 @@ function installTrigger() {
  * pollCalendarAndNotify のトリガーを削除
  */
 function uninstallAllTriggers() {
-  const fn = "pollCalendarAndNotify";
   ScriptApp.getProjectTriggers()
-    .filter((t) => t.getHandlerFunction() === fn)
+    .filter((t) => t.getHandlerFunction() === HANDLER)
     .forEach((t) => ScriptApp.deleteTrigger(t));
 }
 
@@ -507,11 +446,11 @@ function saveNotifiedCache(props, cache) {
 }
 
 function logInfo(message) {
-  safeLog(`INFO: ${message}`);
+  Logger.log(`INFO: ${message}`);
 }
 
 function logWarn(message) {
-  safeLog(`WARN: ${message}`);
+  Logger.log(`WARN: ${message}`);
 }
 
 function logError(message, err) {
@@ -520,13 +459,5 @@ function logError(message, err) {
     const detail = err.stack || err.message || String(err);
     fullMessage += `\n${detail}`;
   }
-  safeLog(fullMessage);
-}
-
-function safeLog(message) {
-  try {
-    Logger.log(message);
-  } catch (e) {
-    // ignore logging failures
-  }
+  Logger.log(fullMessage);
 }

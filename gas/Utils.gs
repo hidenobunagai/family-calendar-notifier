@@ -6,7 +6,7 @@ function buildMessage(kind, ev, tz) {
   const title = ev.summary || "(無題)";
   const htmlLink = ev.htmlLink || "";
   const loc = ev.location ? `\n- 場所: ${ev.location}` : "";
-  const desc = ev.description ? `\n- メモ: ${truncate(ev.description, 400)}` : "";
+  const desc = ev.description ? `\n- メモ: ${truncateMessage(ev.description, 400)}` : "";
 
   const timeText = buildTimeText(ev, tz);
   const rid = ev.recurringEventId ? " (繰り返しインスタンス)" : "";
@@ -66,8 +66,9 @@ function buildTimeText(ev, tz) {
   return "";
 }
 
-function truncate(text, max) {
+function truncateMessage(text, maxLen) {
   if (!text) return "";
-  if (text.length <= max) return text;
-  return `${text.slice(0, max)}…`;
+  if (text.length <= maxLen) return text;
+  const limit = Math.max(maxLen - 1, 0); // "…" 分を確保
+  return `${text.slice(0, limit)}…`;
 }
