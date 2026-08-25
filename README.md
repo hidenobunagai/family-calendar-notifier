@@ -1,4 +1,4 @@
-# Google Calendar → Discord / LINE 通知 (GAS + clasp)
+# Family Calendar Notifier (GAS + clasp)
 
 共有カレンダーの新規・更新・キャンセルを定期ポーリングで検知し、Discord の Webhook と LINE Messaging API に投稿する Google Apps Script プロジェクトです。Google Calendar API (v3) の REST エンドポイントを直接呼び出します。Discord / LINE はそれぞれ個別に有効化でき、両方同時にも送信可能です。
 
@@ -39,7 +39,7 @@ clasp open
 新規に別スクリプトへ作成したい場合は以下（任意）。
 
 ```sh
-clasp create --title "Family Calendar Discord Bot" --type standalone --rootDir ./gas
+clasp create --title "Family Calendar Notifier" --type standalone --rootDir ./gas
 clasp push
 clasp open
 ```
