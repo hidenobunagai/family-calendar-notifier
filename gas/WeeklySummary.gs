@@ -175,6 +175,7 @@ function listCalendarEventsRange(calendarId, timeMin, timeMax, pageToken) {
 /**
  * Format weekly summary message
  */
+// New version that includes all days, showing 予定なし for empty days
 function formatWeeklySummary(events, startDate, endDate, tz) {
   const dayNames = ['日', '月', '火', '水', '木', '金', '土'];
   
@@ -197,37 +198,42 @@ function formatWeeklySummary(events, startDate, endDate, tz) {
   summary += `${startStr} - ${endStr}\n`;
   summary += '━━━━━━━━━━━━━━━━━━━━━━━━\n';
   
-  // Build each day
-  const sortedDates = Object.keys(eventsByDate).sort();
-  sortedDates.forEach(dateStr => {
-    const date = new Date(dateStr + 'T00:00:00');
-    const dayOfWeek = date.getDay();
+  // Generate all dates in the range
+  let eventCount = 0;
+  const current = new Date(startDate);
+  while (current <= endDate) {
+    const dateStr = Utilities.formatDate(current, tz, 'yyyy-MM-dd');
+    const dayOfWeek = current.getDay();
+    
     summary += `\n【${dayNames[dayOfWeek]}曜日】\n`;
     
-    eventsByDate[dateStr].forEach(ev => {
-      const start = ev.start.dateTime || ev.start.date;
-      const time = ev.start.dateTime ? 
-        Utilities.formatDate(new Date(start), tz, 'HH:mm') : 
-        '終日';
-      const summary_text = ev.summary || '(タイトルなし)';
-      summary += `• ${time} - ${summary_text}\n`;
-      
-      if (ev.location) {
-        summary += `  📍 ${ev.location}\n`;
-      }
-    });
-  });
+    if (eventsByDate[dateStr] && eventsByDate[dateStr].length > 0) {
+      eventsByDate[dateStr].forEach(ev => {
+        const start = ev.start.dateTime || ev.start.date;
+        const time = ev.start.dateTime ? 
+          Utilities.formatDate(new Date(start), tz, 'HH:mm') : 
+          '終日';
+        const summary_text = ev.summary || '(タイトルなし)';
+        summary += `• ${time} - ${summary_text}\n`;
+        
+        if (ev.location) {
+          summary += `  📍 ${ev.location}\n`;
+        }
+        eventCount++;
+      });
+    } else {
+      summary += `• 予定なし\n`;
+    }
+    
+    current.setDate(current.getDate() + 1);
+  }
   
   // Footer
   summary += '\n━━━━━━━━━━━━━━━━━━━━━━━━\n';
-  summary += `合計: ${events.length}件の予定`;
+  summary += `合計: ${eventCount}件の予定`;
   
   return summary;
 }
-
-/**
- * Install weekly summary trigger (call once to set up)
- */
 function installWeeklySummaryTrigger() {
   const props = PropertiesService.getScriptProperties();
   
