@@ -126,3 +126,25 @@ clasp open
 - **LINE 400 Bad Request**: `LINE_TARGET_ID` が不正、または公式アカウントと友だち追加されていない。ID の種類（ユーザー / グループ / トークルーム）と友だち追加状態を確認
 - **LINE で届かない（エラーなし）**: 無料枠（Light Plan）の月 1,000 メッセージ上限に達していないか確認。公式アカウントをグループに招待済みかも確認
 - **両チャネルとも送信されない**: `DISCORD_WEBHOOK_URL` と `LINE_CHANNEL_ACCESS_TOKEN` + `LINE_TARGET_ID` が両方未設定の場合、警告ログを出して中断する。少なくとも一方は設定すること
+
+## Weekly Summary Feature
+
+A new feature has been added to send a weekly summary of upcoming events every Sunday evening (or configurable day).
+
+### Setup
+
+1. **Enable the feature**: Set the script property `WEEKLY_SUMMARY_ENABLED` to `true`.
+2. **Configure schedule** (optional):
+   - `WEEKLY_SUMMARY_DAY`: 0 for Sunday (default), 1 for Monday, etc.
+   - `WEEKLY_SUMMARY_HOUR`: Hour in 24h format (default: 18 for 6 PM).
+3. **Install the trigger**: Run the `installWeeklySummaryTrigger()` function once to set up the weekly trigger.
+
+### Functions
+
+- `sendWeeklySummary()`: The main function that generates and sends the weekly summary.
+- `installWeeklySummaryTrigger()`: Sets up the weekly trigger based on configured day and hour.
+- `uninstallWeeklySummaryTrigger()`: Removes the weekly summary trigger.
+
+### Customization
+
+The summary message can be customized by modifying the `sendWeeklySummary()` function in `gas/WeeklySummary.gs`.
