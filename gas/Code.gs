@@ -146,6 +146,8 @@ function pollCalendarAndNotify() {
     }
 
     props.setProperty(PROP_KEYS.lastCheckedAt, nowIso);
+  } catch (err) {
+    logError("pollCalendarAndNotifyで予期しないエラーが発生しました: " + err.message, err);
   } finally {
     lock.releaseLock();
   }
