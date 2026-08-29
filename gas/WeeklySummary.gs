@@ -252,7 +252,7 @@ function installWeeklySummaryTrigger() {
     .atMinute(minute)
     .create();
   
-  logInfo(`Weekly summary trigger installed: Sundays at ${hour}:00`);
+  logInfo(`Weekly summary trigger installed: Sundays at ${hour}:${minute}`);
 }
 
 /**
