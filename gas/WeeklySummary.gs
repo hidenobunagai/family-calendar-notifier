@@ -8,7 +8,8 @@ const WEEKLY_SUMMARY_PROP_KEYS = {
   enabled: "WEEKLY_SUMMARY_ENABLED",
   dayOfWeek: "WEEKLY_SUMMARY_DAY",   // 0=Sunday, 1=Monday, etc.
   hour: "WEEKLY_SUMMARY_HOUR",       // Hour in local timezone (24h format)
-  lastSentAt: "WEEKLY_SUMMARY_LAST_SENT"
+  lastSentAt: "WEEKLY_SUMMARY_LAST_SENT",
+  minute: "WEEKLY_SUMMARY_MINUTE"
 };
 
 const WEEKLY_SUMMARY_HANDLER = "sendWeeklySummary";
@@ -233,6 +234,7 @@ function installWeeklySummaryTrigger() {
   // Default to Sunday at 18:00 if not configured
   const dayOfWeek = parseInt(props.getProperty(WEEKLY_SUMMARY_PROP_KEYS.dayOfWeek) || "0", 10);
   const hour = parseInt(props.getProperty(WEEKLY_SUMMARY_PROP_KEYS.hour) || "18", 10);
+  const minute = parseInt(props.getProperty(WEEKLY_SUMMARY_PROP_KEYS.minute) || "0", 10);
   
   // Remove existing weekly summary triggers
   const triggers = ScriptApp.getProjectTriggers();
@@ -247,6 +249,7 @@ function installWeeklySummaryTrigger() {
     .timeBased()
     .onWeekDay(ScriptApp.WeekDay.SUNDAY)
     .atHour(hour)
+    .atMinute(minute)
     .create();
   
   logInfo(`Weekly summary trigger installed: Sundays at ${hour}:00`);

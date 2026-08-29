@@ -137,6 +137,7 @@ A new feature has been added to send a weekly summary of upcoming events every S
 2. **Configure schedule** (optional):
    - `WEEKLY_SUMMARY_DAY`: 0 for Sunday (default), 1 for Monday, etc.
    - `WEEKLY_SUMMARY_HOUR`: Hour in 24h format (default: 18 for 6 PM).
+   - `WEEKLY_SUMMARY_MINUTE`: Minute of the hour (0-59, default: 0).
 3. **Install the trigger**: Run the `installWeeklySummaryTrigger()` function once to set up the weekly trigger.
 
 ### Functions
