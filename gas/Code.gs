@@ -43,6 +43,13 @@ function pollCalendarAndNotify() {
   }
 
   try {
+
+    // Validate configuration early
+    const validation = validateSetup();
+    if (!validation.ready) {
+      logWarn("Setup validation failed: " + validation.warnings.join(", "));
+      return;
+    }
     const calendarId = (props.getProperty(PROP_KEYS.calendarId) || "").trim();
     const webhookUrl = (props.getProperty(PROP_KEYS.webhookUrl) || "").trim();
     const lineChannelAccessToken = (
