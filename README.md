@@ -44,6 +44,14 @@ clasp push
 clasp open
 ```
 
+## 検証（静的チェック）
+
+GAS コードの構文検査、トップレベル識別子の重複チェック、未定義グローバル参照の簡易検査を実行できます。
+
+```sh
+bun run check
+```
+
 ## Google Calendar API 有効化
 
 - Apps Script エディタ右上の「プロジェクトの設定」→「Google Cloud プロジェクトを表示」で紐づく Cloud プロジェクトを開き、Google Calendar API を有効化してください。

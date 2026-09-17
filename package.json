@@ -1,0 +1,8 @@
+{
+  "name": "family-calendar-notifier",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "bun scripts/check-gas.mjs"
+  }
+}
