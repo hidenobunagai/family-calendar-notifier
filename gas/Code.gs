@@ -6,6 +6,7 @@ const PROP_KEYS = {
   lineTargetId: "LINE_TARGET_ID",
   notifiedCache: "NOTIFIED_CACHE",
   debugMode: "DEBUG_MODE",
+  lastFailureNotifiedAt: "LAST_FAILURE_NOTIFIED_AT",
 };
 
 const HANDLER = "pollCalendarAndNotify"; // トリガーで実行する関数名
@@ -43,6 +44,7 @@ function pollCalendarAndNotify() {
   }
 
   try {
+    let failed = false;
 
     // Validate configuration early
     const validation = validateSetup();
@@ -83,6 +85,7 @@ function pollCalendarAndNotify() {
       logError("Calendar API 呼び出しに失敗しました。設定や権限を確認してください。", err);
       // エラー時も時刻を進めて長期間の重複通知を防ぐ
       props.setProperty(PROP_KEYS.lastCheckedAt, nowIso);
+      notifyFailureOnce(props, "カレンダーの取得に失敗しました（Calendar API エラー）");
       throw err;
     }
 
@@ -106,8 +109,8 @@ function pollCalendarAndNotify() {
         newUpdates.forEach(({ ev }) => markNotified(cache, ev));
         saveNotifiedCache(props, cache);
       } else {
-        let discordOk = !hasDiscord; // 送信不要なら成功扱い
-        let lineOk = !hasLine;
+        let discordOk = true; // 送信に失敗したら false（未設定チャネルは delivered の判定で除外）
+        let lineOk = true;
 
         if (hasDiscord) {
           try {
@@ -133,21 +136,27 @@ function pollCalendarAndNotify() {
           }
         }
 
+        // 設定済みチャネルが 1 つでも送信できたか（未設定チャネルは成功扱いにしない）
+        const delivered = (hasDiscord && discordOk) || (hasLine && lineOk);
         // いずれか一方でも送信成功すれば通知済みとして記録
-        if (discordOk || lineOk) {
+        if (delivered) {
           newUpdates.forEach(({ ev }) => markNotified(cache, ev));
         }
         // 重複通知防止のため、成否にかかわらずキャッシュを保存
         saveNotifiedCache(props, cache);
-        if (!discordOk && !lineOk) {
-          logError("Discord / LINE 両方の送信に失敗しました。");
+        if (!delivered) {
+          failed = true;
+          logError("設定済みの通知チャネルすべてで送信に失敗しました。");
+          notifyFailureOnce(props, "通知の送信に失敗しました（設定済みの全チャネルで失敗）");
         }
       }
     }
 
     props.setProperty(PROP_KEYS.lastCheckedAt, nowIso);
+    if (!failed) clearFailureNotification(props);
   } catch (err) {
     logError("pollCalendarAndNotifyで予期しないエラーが発生しました: " + err.message, err);
+    notifyFailureOnce(props, "予期しないエラーが発生しました: " + err.message);
   } finally {
     lock.releaseLock();
   }
@@ -454,22 +463,78 @@ function saveNotifiedCache(props, cache) {
   }
 }
 
+/**
+ * 実行失敗を 1 回だけ通知する（成功するまで再送しない）。
+ * LAST_FAILURE_NOTIFIED_AT が残っている間は送信済みとみなしてスキップする。
+ * @return {boolean} 通知を送信したか
+ */
+function notifyFailureOnce(props, reason) {
+  if (props.getProperty(PROP_KEYS.lastFailureNotifiedAt)) {
+    return false;
+  }
+
+  const message = `⚠️ 家族カレンダー通知の実行に失敗しました。\n${reason}\n（次に成功するまで、この警告は再送されません）`;
+
+  // DEBUG_MODE では実投稿しない（ログのみ・状態も変更しない）
+  if (isDebugMode(props)) {
+    logWarn(`[DRY-RUN] 失敗通知の送信をスキップしました（DEBUG_MODE=ON）: ${reason}`);
+    return false;
+  }
+
+  const webhookUrl = (props.getProperty(PROP_KEYS.webhookUrl) || "").trim();
+  const lineChannelAccessToken = (props.getProperty(PROP_KEYS.lineChannelAccessToken) || "").trim();
+  const lineTargetId = (props.getProperty(PROP_KEYS.lineTargetId) || "").trim();
+
+  let sent = false;
+  if (webhookUrl) {
+    try {
+      postToDiscord(webhookUrl, message);
+      sent = true;
+    } catch (err) {
+      logError("失敗通知の Discord 送信に失敗しました。", err);
+    }
+  }
+  if (!sent && lineChannelAccessToken && lineTargetId) {
+    try {
+      postToLine(lineChannelAccessToken, lineTargetId, [message]);
+      sent = true;
+    } catch (err) {
+      logError("失敗通知の LINE 送信に失敗しました。", err);
+    }
+  }
+
+  if (!sent) {
+    logError("失敗通知を送信できるチャネルがありませんでした。");
+    return false;
+  }
+
+  props.setProperty(PROP_KEYS.lastFailureNotifiedAt, new Date().toISOString());
+  logInfo("失敗通知を送信しました。次に成功するまで再送しません。");
+  return true;
+}
+
+/**
+ * 実行が成功したときに失敗通知の状態を消す（次回の失敗では再度通知する）。
+ */
+function clearFailureNotification(props) {
+  props.deleteProperty(PROP_KEYS.lastFailureNotifiedAt);
+}
+
 function logInfo(message) {
-  Logger.log(`INFO: ${message}`);
+  console.log(message);
 }
 
 function logWarn(message) {
-  Logger.log(`WARN: ${message}`);
+  console.warn(message);
 }
 
 function logError(message, err) {
-  let fullMessage = `ERROR: ${message}`;
+  // stack は第 2 引数で渡して severity と合わせて構造化する
   if (err) {
-    const detail = err.stack || err.message || String(err);
-    fullMessage += `\n${detail}`;
+    console.error(message, err.stack || err.message || String(err));
+  } else {
+    console.error(message);
   }
-
-  Logger.log(fullMessage);
 }
 
 /**
