@@ -7,6 +7,7 @@
 - `gas/appsscript.json`: マニフェスト（スコープ定義 / タイムゾーン）
 - `gas/Code.gs`: 差分取得・Discord / LINE 送信・トリガー
 - `gas/Utils.gs`: メッセージ整形ユーティリティ
+- `gas/WeeklySummary.gs`: 週次サマリー通知・トリガー
 
 ## .clasp.json について（重要）
 
@@ -66,7 +67,6 @@ bun run check
 - `LAST_CHECKED_AT`: 任意（初回取りこぼし防止。未設定時は現在時刻から 6 時間巻き戻し）
 - `NOTIFIED_CACHE`: 自動管理（重複通知防止キャッシュ。手動設定不要）
 - `DEBUG_MODE`: 任意（`true` にすると各チャネルへの実際の投稿をスキップし、ログのみ出力。デプロイ前の動作確認用）
-- `LOCK`: 自動管理（トリガー重複実行防止用ロック。手動設定不要）
 
 通知先の有効条件:
 
@@ -141,12 +141,14 @@ A new feature has been added to send a weekly summary of upcoming events every S
 
 ### Setup
 
-1. **Enable the feature**: Set the script property `WEEKLY_SUMMARY_ENABLED` to `true`.
+1. **Enable / disable**: The feature is enabled by default. To disable it, set the script property `WEEKLY_SUMMARY_ENABLED` to `false` (no need to set `true`).
 2. **Configure schedule** (optional):
    - `WEEKLY_SUMMARY_DAY`: 0 for Sunday (default), 1 for Monday, etc.
    - `WEEKLY_SUMMARY_HOUR`: Hour in 24h format (default: 18 for 6 PM).
    - `WEEKLY_SUMMARY_MINUTE`: Minute of the hour (0-59, default: 0).
 3. **Install the trigger**: Run the `installWeeklySummaryTrigger()` function once to set up the weekly trigger.
+
+`WEEKLY_SUMMARY_LAST_SENT` is auto-managed to prevent duplicate sends; no manual setup is needed.
 
 ### Functions
 

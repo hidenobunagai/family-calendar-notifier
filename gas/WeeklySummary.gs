@@ -14,6 +14,16 @@ const WEEKLY_SUMMARY_PROP_KEYS = {
 
 const WEEKLY_SUMMARY_HANDLER = "sendWeeklySummary";
 
+const WEEKLY_SUMMARY_WEEKDAYS = [
+  ScriptApp.WeekDay.SUNDAY,
+  ScriptApp.WeekDay.MONDAY,
+  ScriptApp.WeekDay.TUESDAY,
+  ScriptApp.WeekDay.WEDNESDAY,
+  ScriptApp.WeekDay.THURSDAY,
+  ScriptApp.WeekDay.FRIDAY,
+  ScriptApp.WeekDay.SATURDAY,
+];
+
 /**
  * Main weekly summary function - called by weekly trigger
  */
@@ -253,15 +263,16 @@ function installWeeklySummaryTrigger() {
     }
   });
   
-  // Create new weekly trigger
+  // Create new weekly trigger (invalid dayOfWeek falls back to Sunday)
+  const dayIndex = WEEKLY_SUMMARY_WEEKDAYS[dayOfWeek] ? dayOfWeek : 0;
   ScriptApp.newTrigger(WEEKLY_SUMMARY_HANDLER)
     .timeBased()
-    .onWeekDay(ScriptApp.WeekDay.SUNDAY)
+    .onWeekDay(WEEKLY_SUMMARY_WEEKDAYS[dayIndex])
     .atHour(hour)
     .atMinute(minute)
     .create();
   
-  logInfo(`Weekly summary trigger installed: Sundays at ${hour}:${minute}`);
+  logInfo(`Weekly summary trigger installed: weekday ${dayIndex} at ${hour}:${minute}`);
 }
 
 /**
