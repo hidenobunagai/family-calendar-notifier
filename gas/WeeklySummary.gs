@@ -76,6 +76,7 @@ function sendWeeklySummary() {
     events = fetchEventsForRange(calendarId, startDate.toISOString(), endDate.toISOString());
   } catch (err) {
     logError("Weekly summary: Failed to fetch calendar events.", err);
+    notifyFailureOnce(props, "週次サマリーの予定取得に失敗しました（Calendar API エラー）");
     return;
   }
   
@@ -89,25 +90,38 @@ function sendWeeklySummary() {
   
   // Send to configured channels
   const messages = [summary];
-  
+
+  let discordOk = true; // 送信に失敗したら false（未設定チャネルは delivered の判定で除外）
+  let lineOk = true;
+
   if (hasDiscord) {
     try {
       postToDiscord(webhookUrl, messages);
       logInfo("Weekly summary sent to Discord.");
     } catch (err) {
       logError("Weekly summary: Discord send failed.", err);
+      discordOk = false;
     }
   }
-  
+
   if (hasLine) {
     try {
       postToLine(lineChannelAccessToken, lineTargetId, messages);
       logInfo("Weekly summary sent to LINE.");
     } catch (err) {
       logError("Weekly summary: LINE send failed.", err);
+      lineOk = false;
     }
   }
-  
+
+  // 設定済みチャネルが 1 つでも送信できたか
+  const delivered = (hasDiscord && discordOk) || (hasLine && lineOk);
+  if (delivered) {
+    clearFailureNotification(props);
+  } else {
+    notifyFailureOnce(props, "週次サマリーの送信に失敗しました（設定済みの全チャネルで失敗）");
+  }
+
   // Record that we sent it
   props.setProperty(WEEKLY_SUMMARY_PROP_KEYS.lastSentAt, now.toISOString());
   logInfo("Weekly summary generation complete.");
@@ -133,8 +147,8 @@ function fetchEventsForRange(calendarId, timeMin, timeMax) {
  * List calendar events for a specific time range
  */
 function listCalendarEventsRange(calendarId, timeMin, timeMax, pageToken) {
-  const props = PropertiesService.getScriptProperties();
-  const accessToken = getAccessToken(props);
+  // 未定義だった getAccessToken を廃止し、Code.gs と同じ ScriptApp.getOAuthToken() を使う
+  const accessToken = ScriptApp.getOAuthToken();
   
   let url = `${CALENDAR_API_BASE}/calendars/${encodeURIComponent(calendarId)}/events?` +
     `timeMin=${encodeURIComponent(timeMin)}&timeMax=${encodeURIComponent(timeMax)}&` +
