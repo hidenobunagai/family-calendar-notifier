@@ -482,10 +482,23 @@ function setupWeeklySummary() {
 
 /**
  * Test function for weekly summary (dry run).
+ * DEBUG_MODE は実行前の値に必ず戻す（未設定だった場合は削除する）。
+ * 戻し忘れると以後の pollCalendarAndNotify がドライランのままになり、実投稿が止まる。
  */
 function testWeeklySummary() {
   const props = PropertiesService.getScriptProperties();
+  const previousDebugMode = props.getProperty(PROP_KEYS.debugMode);
+
   props.setProperty(PROP_KEYS.debugMode, "true");
-  
-  sendWeeklySummary();
+  try {
+    sendWeeklySummary();
+  } finally {
+    if (previousDebugMode === null) {
+      props.deleteProperty(PROP_KEYS.debugMode);
+      logInfo("testWeeklySummary: DEBUG_MODE を未設定に戻しました。");
+    } else {
+      props.setProperty(PROP_KEYS.debugMode, previousDebugMode);
+      logInfo(`testWeeklySummary: DEBUG_MODE を "${previousDebugMode}" に戻しました。`);
+    }
+  }
 }
