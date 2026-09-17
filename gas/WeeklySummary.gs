@@ -56,9 +56,10 @@ function sendWeeklySummary() {
   
   logInfo("Generating weekly summary...");
   
-  // Fetch events for the next 7 days
-  const startDate = new Date(now.getTime() + 60 * 1000); // Start from now + 1 minute
-  const endDate = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000); // 7 days ahead
+  // Fetch events for the next 7 full days: tomorrow 0:00 local up to the 8th day 0:00.
+  // endDate is exclusive so the fetch range, the day headings and the header range agree.
+  const startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+  const endDate = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate() + 7);
   
   let events;
   try {
@@ -69,8 +70,7 @@ function sendWeeklySummary() {
   }
   
   if (events.length === 0) {
-    logInfo("Weekly summary: No upcoming events found.");
-    return;
+    logInfo("Weekly summary: No upcoming events in the next 7 days. Sending an empty summary.");
   }
   
   // Format the summary
@@ -191,19 +191,24 @@ function formatWeeklySummary(events, startDate, endDate, tz) {
     eventsByDate[dateStr].push(ev);
   });
   
+  // Days covered by the summary. endDate is exclusive, so this is exactly 7 days, and
+  // the header and the day headings are both derived from this single list.
+  const days = [];
+  for (let d = new Date(startDate); d < endDate; d.setDate(d.getDate() + 1)) {
+    days.push(new Date(d));
+  }
+  
   // Build header
-  const startStr = Utilities.formatDate(startDate, tz, 'yyyy/MM/dd');
-  const endStr = Utilities.formatDate(endDate, tz, 'yyyy/MM/dd');
+  const startStr = Utilities.formatDate(days[0], tz, 'yyyy/MM/dd');
+  const endStr = Utilities.formatDate(days[days.length - 1], tz, 'yyyy/MM/dd');
   let summary = `📅 今週の予定 (Weekly Plan)\n`;
   summary += `${startStr} - ${endStr}\n`;
   summary += '━━━━━━━━━━━━━━━━━━━━━━━━\n';
   
-  // Generate all dates in the range
   let eventCount = 0;
-  const current = new Date(startDate);
-  while (current <= endDate) {
-    const dateStr = Utilities.formatDate(current, tz, 'yyyy-MM-dd');
-    const dayOfWeek = current.getDay();
+  days.forEach(day => {
+    const dateStr = Utilities.formatDate(day, tz, 'yyyy-MM-dd');
+    const dayOfWeek = day.getDay();
     
     summary += `\n【${dayNames[dayOfWeek]}曜日】\n`;
     
@@ -224,9 +229,7 @@ function formatWeeklySummary(events, startDate, endDate, tz) {
     } else {
       summary += `• 予定なし\n`;
     }
-    
-    current.setDate(current.getDate() + 1);
-  }
+  });
   
   // Footer
   summary += '\n━━━━━━━━━━━━━━━━━━━━━━━━\n';
