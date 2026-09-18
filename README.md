@@ -64,7 +64,7 @@ bun run check
 - `DISCORD_WEBHOOK_URL`: Discord Webhook URL（Discord 通知を使う場合）
 - `LINE_CHANNEL_ACCESS_TOKEN`: LINE Messaging API のチャネルアクセストークン（LINE 通知を使う場合）
 - `LINE_TARGET_ID`: LINE の送信先 ID（ユーザー / グループ / トークルーム ID。LINE 通知を使う場合）
-- `LAST_CHECKED_AT`: 任意（初回取りこぼし防止。未設定時は現在時刻から 6 時間巻き戻し）
+- `LAST_CHECKED_AT`: 任意（初回取りこぼし防止。未設定時は現在時刻から 6 時間巻き戻し。6 時間より古い値は 6 時間前に丸める）
 - `NOTIFIED_CACHE`: 自動管理（重複通知防止キャッシュ。手動設定不要）
 - `DEBUG_MODE`: 任意（`true` にすると各チャネルへの実際の投稿をスキップし、ログのみ出力。デプロイ前の動作確認用）
 
@@ -85,7 +85,7 @@ bun run check
 ## 動作の要点
 
 - 実行ロック: 前回の実行が継続中の場合、重複実行をスキップ（10分で自動解除）
-- 差分取得: `updatedMin` を使用し、前回チェック時刻から 60 秒巻き戻して取得
+- 差分取得: `updatedMin` を使用し、前回チェック時刻から 60 秒巻き戻して取得。`updatedMin` が古すぎると Calendar API が 410 を返すため遡り幅は最大 6 時間で、記録された `LAST_CHECKED_AT` がそれより古い場合（トリガー停止など）は 6 時間前に丸めたうえで、捨てた期間を WARN ログと次の通知の 1 行注記で明示
 - Calendar API リトライ: 一時的なエラー時に最大 3 回のリトライ
 - 変更判定: 新規/更新/キャンセルを分類
 - Discord 投稿: 2000 文字制限に配慮して分割送信、429 レート制限時は `Retry-After` に従いリトライ

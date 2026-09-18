@@ -75,8 +75,19 @@ function pollCalendarAndNotify() {
 
     const now = new Date();
     const nowIso = now.toISOString();
-    const lastCheckedDate = computeLastCheckedDate(props.getProperty(PROP_KEYS.lastCheckedAt), now);
+    const rawLastChecked = props.getProperty(PROP_KEYS.lastCheckedAt);
+    const { date: lastCheckedDate, droppedMs } = computeLastCheckedDate(rawLastChecked, now);
     const lastCheckedIso = lastCheckedDate.toISOString();
+
+    let recordedHours = "";
+    let droppedHours = "";
+    if (droppedMs > 0) {
+      recordedHours = ((now.getTime() - new Date(rawLastChecked).getTime()) / 3600000).toFixed(1);
+      droppedHours = (droppedMs / 3600000).toFixed(1);
+      logWarn(
+        `LAST_CHECKED_AT (${recordedHours} 時間前) のため、${droppedHours} 時間分の差分を取りこぼしました。updatedMin は最大 ${DEFAULT_LOOKBACK_MS / 3600000} 時間前までです。`,
+      );
+    }
 
     let updates;
     try {
@@ -98,6 +109,11 @@ function pollCalendarAndNotify() {
     if (newUpdates.length) {
       const tz = Session.getScriptTimeZone() || "Asia/Tokyo";
       const messages = newUpdates.map(({ kind, ev }) => buildMessage(kind, ev, tz));
+      if (droppedMs > 0) {
+        messages.unshift(
+          `⚠️ 前回チェックから ${recordedHours} 時間経過したため、古い ${droppedHours} 時間分の更新は通知できません。`,
+        );
+      }
       if (isDebugMode(props)) {
         const channels = [];
         if (hasDiscord) channels.push("Discord");
@@ -192,19 +208,23 @@ function computeLastCheckedDate(rawValue, now) {
   const floorMs = now.getTime() - DEFAULT_LOOKBACK_MS;
 
   if (!rawValue) {
-    return new Date(floorMs);
+    return { date: new Date(floorMs), droppedMs: 0 };
   }
 
   const parsed = new Date(rawValue);
   const parsedMs = parsed.getTime();
   if (Number.isNaN(parsedMs)) {
     logWarn(`LAST_CHECKED_AT (${rawValue}) が不正だったためリセットします。`);
-    return new Date(floorMs);
+    return { date: new Date(floorMs), droppedMs: 0 };
   }
 
-  // SAFETY_OFFSET で少し巻き戻しつつ、古すぎる場合は floorMs でキャップ
+  // SAFETY_OFFSET で少し巻き戻しつつ、古すぎる場合は floorMs でキャップ（取りこぼしミリ秒数を検知）
   const rewound = parsedMs - SAFETY_OFFSET_MS;
-  return new Date(Math.max(rewound, floorMs));
+  if (rewound < floorMs) {
+    return { date: new Date(floorMs), droppedMs: floorMs - rewound };
+  } else {
+    return { date: new Date(rewound), droppedMs: 0 };
+  }
 }
 
 function listCalendarEvents(calendarId, updatedMin, pageToken) {
