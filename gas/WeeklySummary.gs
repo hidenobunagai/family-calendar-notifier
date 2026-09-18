@@ -96,7 +96,8 @@ function sendWeeklySummary() {
 
   if (hasDiscord) {
     try {
-      postToDiscord(webhookUrl, messages);
+      // postToDiscord は文字列（1 メッセージ）を取る。配列を渡すと {"content":[…]} になり Discord が 400 を返す
+      postToDiscord(webhookUrl, messages[0]);
       logInfo("Weekly summary sent to Discord.");
     } catch (err) {
       logError("Weekly summary: Discord send failed.", err);
@@ -283,7 +284,7 @@ function installWeeklySummaryTrigger() {
     .timeBased()
     .onWeekDay(WEEKLY_SUMMARY_WEEKDAYS[dayIndex])
     .atHour(hour)
-    .atMinute(minute)
+    .nearMinute(minute)
     .create();
   
   logInfo(`Weekly summary trigger installed: weekday ${dayIndex} at ${hour}:${minute}`);
