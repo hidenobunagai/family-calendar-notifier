@@ -1,7 +1,6 @@
 const PROP_KEYS = {
   lastCheckedAt: "LAST_CHECKED_AT",
   calendarId: "CALENDAR_ID",
-  webhookUrl: "DISCORD_WEBHOOK_URL",
   lineChannelAccessToken: "LINE_CHANNEL_ACCESS_TOKEN",
   lineTargetId: "LINE_TARGET_ID",
   notifiedCache: "NOTIFIED_CACHE",
@@ -16,8 +15,6 @@ const SAFETY_OFFSET_MS = 60 * 1000; // rewind by 60 seconds to avoid misses
 const CALENDAR_API_BASE = "https://www.googleapis.com/calendar/v3";
 const TRIGGER_INTERVAL_MINUTES = 5;
 const MAX_NOTIFIED_CACHE_ENTRIES = 200;
-const DISCORD_CHUNK_INTERVAL_MS = 1000; // レート制限対策: チャンク間待機 (ms)
-const DISCORD_MAX_RETRIES = 3;
 const LOCK_TIMEOUT_MS = 10 * 60 * 1000; // ロックの有効期限 (10分)
 const CALENDAR_API_MAX_RETRIES = 3;
 // LINE Messaging API 関連 (LINE Notify は 2025/3 廃止のため非採用)
@@ -28,10 +25,9 @@ const LINE_MAX_MESSAGES_PER_PUSH = 5; // 1 push あたりのメッセージ数�
 const LINE_CHUNK_INTERVAL_MS = 1000; // レート制限対策: push 間待機 (ms)
 
 /**
- * 直近の更新差分を取得して Discord / LINE に通知
- * - Discord: DISCORD_WEBHOOK_URL が設定されている場合のみ送信
+ * 直近の更新差分を取得して LINE に通知
  * - LINE: LINE_CHANNEL_ACCESS_TOKEN + LINE_TARGET_ID が両方設定されている場合のみ送信
- * どちらも未設定の場合は警告して中断。いずれか1つでも送信成功すれば通知済みキャッシュに記録。
+ * 未設定の場合は警告して中断。送信成功すれば通知済みキャッシュに記録。
  */
 function pollCalendarAndNotify() {
   const props = PropertiesService.getScriptProperties();
@@ -53,22 +49,20 @@ function pollCalendarAndNotify() {
       return;
     }
     const calendarId = (props.getProperty(PROP_KEYS.calendarId) || "").trim();
-    const webhookUrl = (props.getProperty(PROP_KEYS.webhookUrl) || "").trim();
     const lineChannelAccessToken = (
       props.getProperty(PROP_KEYS.lineChannelAccessToken) || ""
     ).trim();
     const lineTargetId = (props.getProperty(PROP_KEYS.lineTargetId) || "").trim();
 
-    const hasDiscord = !!calendarId && !!webhookUrl;
     const hasLine = !!lineChannelAccessToken && !!lineTargetId;
 
     if (!calendarId) {
       logWarn("Script Properties に CALENDAR_ID が未設定です。");
       return;
     }
-    if (!hasDiscord && !hasLine) {
+    if (!hasLine) {
       logWarn(
-        "Script Properties に通知先が未設定です。DISCORD_WEBHOOK_URL または LINE_CHANNEL_ACCESS_TOKEN + LINE_TARGET_ID を設定してください。",
+        "Script Properties に通知先が未設定です。LINE_CHANNEL_ACCESS_TOKEN + LINE_TARGET_ID を設定してください。",
       );
       return;
     }
@@ -115,46 +109,26 @@ function pollCalendarAndNotify() {
         );
       }
       if (isDebugMode(props)) {
-        const channels = [];
-        if (hasDiscord) channels.push("Discord");
-        if (hasLine) channels.push("LINE");
         logInfo(
-          `[DRY-RUN] 以下の ${messages.length} 件を ${channels.join(" / ")} へ送信予定（DEBUG_MODE=ON）:\n${messages.join("\n---\n")}`,
+          `[DRY-RUN] 以下の ${messages.length} 件を LINE へ送信予定（DEBUG_MODE=ON）:\n${messages.join("\n---\n")}`,
         );
         // ドライラン時もキャッシュに記録して重複通知を防ぐ
         newUpdates.forEach(({ ev }) => markNotified(cache, ev));
         saveNotifiedCache(props, cache);
       } else {
-        let discordOk = true; // 送信に失敗したら false（未設定チャネルは delivered の判定で除外）
         let lineOk = true;
 
-        if (hasDiscord) {
-          try {
-            postToDiscordInChunks(webhookUrl, messages);
-          } catch (err) {
-            logError(
-              "Discord 送信処理でエラーが発生しました。Webhook URL を確認してください。",
-              err,
-            );
-            discordOk = false;
-          }
+        try {
+          postToLineInChunks(lineChannelAccessToken, lineTargetId, messages);
+        } catch (err) {
+          logError(
+            "LINE 送信処理でエラーが発生しました。アクセストークン / ターゲット ID を確認してください。",
+            err,
+          );
+          lineOk = false;
         }
 
-        if (hasLine) {
-          try {
-            postToLineInChunks(lineChannelAccessToken, lineTargetId, messages);
-          } catch (err) {
-            logError(
-              "LINE 送信処理でエラーが発生しました。アクセストークン / ターゲット ID を確認してください。",
-              err,
-            );
-            lineOk = false;
-          }
-        }
-
-        // 設定済みチャネルが 1 つでも送信できたか（未設定チャネルは成功扱いにしない）
-        const delivered = (hasDiscord && discordOk) || (hasLine && lineOk);
-        // いずれか一方でも送信成功すれば通知済みとして記録
+        const delivered = lineOk;
         if (delivered) {
           newUpdates.forEach(({ ev }) => markNotified(cache, ev));
         }
@@ -162,8 +136,8 @@ function pollCalendarAndNotify() {
         saveNotifiedCache(props, cache);
         if (!delivered) {
           failed = true;
-          logError("設定済みの通知チャネルすべてで送信に失敗しました。");
-          notifyFailureOnce(props, "通知の送信に失敗しました（設定済みの全チャネルで失敗）");
+          logError("LINE 送信に失敗しました。");
+          notifyFailureOnce(props, "通知の送信に失敗しました（LINE 送信エラー）");
         }
       }
     }
@@ -317,55 +291,6 @@ function chunkMessages(messages, sep, maxLen) {
 }
 
 /**
- * Discord メッセージを分割送信
- */
-function postToDiscordInChunks(webhookUrl, messages) {
-  const chunks = chunkMessages(messages, "\n\n", 1800);
-  for (let i = 0; i < chunks.length; i++) {
-    if (i > 0) Utilities.sleep(DISCORD_CHUNK_INTERVAL_MS);
-    postToDiscord(webhookUrl, chunks[i]);
-  }
-}
-
-/**
- * Discord Webhook へ送信（429 時は Retry-After に従いリトライ）
- */
-function postToDiscord(webhookUrl, content) {
-  const payload = { content };
-  const params = {
-    method: "post",
-    contentType: "application/json",
-    payload: JSON.stringify(payload),
-    muteHttpExceptions: true,
-  };
-
-  for (let attempt = 1; attempt <= DISCORD_MAX_RETRIES; attempt++) {
-    const res = UrlFetchApp.fetch(webhookUrl, params);
-    const code = res.getResponseCode();
-    if (code >= 200 && code < 300) return;
-
-    if (code === 429 && attempt < DISCORD_MAX_RETRIES) {
-      let waitMs = DISCORD_CHUNK_INTERVAL_MS * attempt;
-      try {
-        const body = JSON.parse(res.getContentText());
-        if (body.retry_after) waitMs = Math.ceil(body.retry_after * 1000);
-      } catch (_) {}
-      logWarn(
-        `Discord レート制限 (429)。${waitMs}ms 後にリトライ (${attempt}/${DISCORD_MAX_RETRIES})`,
-      );
-      Utilities.sleep(waitMs);
-      continue;
-    }
-
-    const body = res.getContentText();
-    const err = new Error(`Discord 送信エラー (${code}): ${body}`);
-    logError(`Discord 送信エラー (${code})`, err);
-    throw err;
-  }
-  throw new Error("Discord 送信エラー: リトライ上限に達しました (429)");
-}
-
-/**
  * LINE Messaging API へのメッセージ送信 (push) をチャンク分割で実行
  * @param {string} channelAccessToken LINE_CHANNEL_ACCESS_TOKEN
  * @param {string} targetId LINE_TARGET_ID (ユーザー/グループ/トークルーム ID)
@@ -501,20 +426,11 @@ function notifyFailureOnce(props, reason) {
     return false;
   }
 
-  const webhookUrl = (props.getProperty(PROP_KEYS.webhookUrl) || "").trim();
   const lineChannelAccessToken = (props.getProperty(PROP_KEYS.lineChannelAccessToken) || "").trim();
   const lineTargetId = (props.getProperty(PROP_KEYS.lineTargetId) || "").trim();
 
   let sent = false;
-  if (webhookUrl) {
-    try {
-      postToDiscord(webhookUrl, message);
-      sent = true;
-    } catch (err) {
-      logError("失敗通知の Discord 送信に失敗しました。", err);
-    }
-  }
-  if (!sent && lineChannelAccessToken && lineTargetId) {
+  if (lineChannelAccessToken && lineTargetId) {
     try {
       postToLine(lineChannelAccessToken, lineTargetId, [message]);
       sent = true;
@@ -524,7 +440,7 @@ function notifyFailureOnce(props, reason) {
   }
 
   if (!sent) {
-    logError("失敗通知を送信できるチャネルがありませんでした。");
+    logError("失敗通知を送信できませんでした（LINE 未設定または送信エラー）。");
     return false;
   }
 

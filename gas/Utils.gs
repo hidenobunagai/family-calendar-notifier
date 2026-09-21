@@ -1,5 +1,5 @@
 /**
- * 通知メッセージを構築 (Discord / LINE 共通)
+ * 通知メッセージを構築 (LINE 送信用)
  * プレーンテキスト形式のため Markdown 非依存。LINE でもそのまま表示可能。
  */
 function buildMessage(kind, ev, tz) {
@@ -84,21 +84,19 @@ function validateSetup() {
   const props = PropertiesService.getScriptProperties();
   const results = {
     calendarId: !!props.getProperty(PROP_KEYS.calendarId),
-    discordWebhook: !!props.getProperty(PROP_KEYS.webhookUrl),
     lineToken: !!props.getProperty(PROP_KEYS.lineChannelAccessToken),
     lineTarget: !!props.getProperty(PROP_KEYS.lineTargetId),
     lastChecked: props.getProperty(PROP_KEYS.lastCheckedAt) || "never",
   };
-  
-  const hasDiscord = results.discordWebhook;
+
   const hasLine = results.lineToken && results.lineTarget;
   const hasCalendar = results.calendarId;
-  
-  results.ready = hasCalendar && (hasDiscord || hasLine);
+
+  results.ready = hasCalendar && hasLine;
   results.warnings = [];
-  
+
   if (!hasCalendar) results.warnings.push("CALENDAR_ID not set");
-  if (!hasDiscord && !hasLine) results.warnings.push("No notification channel configured (set Discord webhook or LINE credentials)");
+  if (!hasLine) results.warnings.push("No notification channel configured (set LINE credentials)");
   if (hasLine && !results.lineTarget) results.warnings.push("LINE_CHANNEL_ACCESS_TOKEN set but LINE_TARGET_ID missing");
   
   return results;

@@ -39,18 +39,16 @@ function sendWeeklySummary() {
   
   // Validate setup
   const calendarId = (props.getProperty(PROP_KEYS.calendarId) || "").trim();
-  const webhookUrl = (props.getProperty(PROP_KEYS.webhookUrl) || "").trim();
   const lineChannelAccessToken = (props.getProperty(PROP_KEYS.lineChannelAccessToken) || "").trim();
   const lineTargetId = (props.getProperty(PROP_KEYS.lineTargetId) || "").trim();
-  
-  const hasDiscord = !!calendarId && !!webhookUrl;
+
   const hasLine = !!lineChannelAccessToken && !!lineTargetId;
-  
+
   if (!calendarId) {
     logWarn("Weekly summary: CALENDAR_ID not set. Skipping.");
     return;
   }
-  if (!hasDiscord && !hasLine) {
+  if (!hasLine) {
     logWarn("Weekly summary: No notification channel configured. Skipping.");
     return;
   }
@@ -88,39 +86,23 @@ function sendWeeklySummary() {
   const tz = Session.getScriptTimeZone() || "Asia/Tokyo";
   const summary = formatWeeklySummary(events, startDate, endDate, tz);
   
-  // Send to configured channels
+  // Send to LINE
   const messages = [summary];
-
-  let discordOk = true; // 送信に失敗したら false（未設定チャネルは delivered の判定で除外）
   let lineOk = true;
 
-  if (hasDiscord) {
-    try {
-      // postToDiscord は文字列（1 メッセージ）を取る。配列を渡すと {"content":[…]} になり Discord が 400 を返す
-      postToDiscord(webhookUrl, messages[0]);
-      logInfo("Weekly summary sent to Discord.");
-    } catch (err) {
-      logError("Weekly summary: Discord send failed.", err);
-      discordOk = false;
-    }
+  try {
+    postToLine(lineChannelAccessToken, lineTargetId, messages);
+    logInfo("Weekly summary sent to LINE.");
+  } catch (err) {
+    logError("Weekly summary: LINE send failed.", err);
+    lineOk = false;
   }
 
-  if (hasLine) {
-    try {
-      postToLine(lineChannelAccessToken, lineTargetId, messages);
-      logInfo("Weekly summary sent to LINE.");
-    } catch (err) {
-      logError("Weekly summary: LINE send failed.", err);
-      lineOk = false;
-    }
-  }
-
-  // 設定済みチャネルが 1 つでも送信できたか
-  const delivered = (hasDiscord && discordOk) || (hasLine && lineOk);
+  const delivered = lineOk;
   if (delivered) {
     clearFailureNotification(props);
   } else {
-    notifyFailureOnce(props, "週次サマリーの送信に失敗しました（設定済みの全チャネルで失敗）");
+    notifyFailureOnce(props, "週次サマリーの送信に失敗しました（LINE 送信エラー）");
   }
 
   // Record that we sent it
