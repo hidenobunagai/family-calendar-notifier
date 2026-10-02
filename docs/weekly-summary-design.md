@@ -64,7 +64,7 @@
 - `WEEKLY_SUMMARY_DAY`: 送信曜日（デフォルト: `0` = 日曜日、0=日曜、1=月曜...）
 - `WEEKLY_SUMMARY_HOUR`: 送信時（24時間表記、デフォルト: `18`。範囲外は 0〜23 にクランプ）
 - `WEEKLY_SUMMARY_MINUTE`: 送信分（0〜59、デフォルト: `0`。範囲外は 0〜59 にクランプ）
-- `WEEKLY_SUMMARY_LAST_SENT`: 自動管理プロパティ（同日の重複送信防止用タイムスタンプ、手動設定不要）
+- `WEEKLY_SUMMARY_LAST_SENT`: 自動管理プロパティ（同日の重複送信防止用。スクリプトタイムゾーンの日付 `yyyy-MM-dd` を保存、手動設定不要。旧形式の UTC ISO 値も当日分として扱う）
 
 ### 4. Trigger Setup
 - `installWeeklySummaryTrigger()`: 設定された曜日（day）、時（hour）、分（minute）を反映した週次タイムベーストリガーを作成（既存のサマリートリガーがあれば削除して再作成）。day は範囲外なら日曜へフォールバック、hour と minute は範囲内にクランプし、丸めた場合はログに WARN として残す

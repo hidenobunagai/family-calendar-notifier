@@ -56,8 +56,9 @@ function sendWeeklySummary() {
   // Check if already sent today (prevent duplicates)
   const lastSent = props.getProperty(WEEKLY_SUMMARY_PROP_KEYS.lastSentAt);
   const now = new Date();
-  const today = Utilities.formatDate(now, Session.getScriptTimeZone() || "Asia/Tokyo", "yyyy-MM-dd");
-  if (lastSent && lastSent.startsWith(today)) {
+  const tz = Session.getScriptTimeZone() || "Asia/Tokyo";
+  const today = Utilities.formatDate(now, tz, "yyyy-MM-dd");
+  if (isWeeklySummarySentOn(lastSent, today, tz)) {
     logInfo("Weekly summary already sent today. Skipping.");
     return;
   }
@@ -83,7 +84,6 @@ function sendWeeklySummary() {
   }
   
   // Format the summary
-  const tz = Session.getScriptTimeZone() || "Asia/Tokyo";
   const summary = formatWeeklySummary(events, startDate, endDate, tz);
   
   // Send to LINE
@@ -111,9 +111,28 @@ function sendWeeklySummary() {
     notifyFailureOnce(props, "週次サマリーの送信に失敗しました（LINE 送信エラー）");
   }
 
-  // Record that we sent it
-  props.setProperty(WEEKLY_SUMMARY_PROP_KEYS.lastSentAt, now.toISOString());
+  // 送信済みであることを記録する。判定と同じ基準（スクリプトタイムゾーンの日付）で保存する。
+  props.setProperty(WEEKLY_SUMMARY_PROP_KEYS.lastSentAt, today);
   logInfo("Weekly summary generation complete.");
+}
+
+/**
+ * 記録済みの送信日と「今日」が一致するか（＝この日は送信済みか）。
+ *
+ * 保存値はローカル日付 (yyyy-MM-dd) だが、修正前は UTC ISO (`toISOString()`) で
+ * 書かれていた。ローカル 00:00-08:59 に走るとその日付は前日の UTC 日付になり、
+ * `startsWith(today)` が一致せず同じ日に何度でも送信できていた。
+ * 旧形式の日付文字列 / ISO 値も当日分として扱う（後方互換）。
+ */
+function isWeeklySummarySentOn(lastSent, today, tz) {
+  if (!lastSent) return false;
+  // 旧形式: UTC ISO。絶対時刻なので、tz で日付化すれば保存した日のローカル日付になる。
+  if (/^\d{4}-\d{2}-\d{2}T/.test(lastSent)) {
+    const ms = new Date(lastSent).getTime();
+    if (Number.isNaN(ms)) return false;
+    return Utilities.formatDate(new Date(ms), tz, "yyyy-MM-dd") === today;
+  }
+  return lastSent.slice(0, 10) === today;
 }
 
 /**
