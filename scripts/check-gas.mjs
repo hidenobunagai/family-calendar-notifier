@@ -154,11 +154,52 @@ if (unknownCalls.size > 0) {
   console.warn(`Warning: Potential undeclared function calls: ${[...unknownCalls].join(", ")}`);
 }
 
+// 4. スクリプトプロパティ名の doc ↔ 実装ドリフト検査
+// PROP_KEYS / WEEKLY_SUMMARY_PROP_KEYS の値とドキュメント中の `ALL_CAPS` 名を突き合わせる。
+// 実装に無い名前がドキュメントに残ると死んだ行になる（例: 廃止済みの `LOCK`）。
+const PROP_KEY_CONSTS = ["PROP_KEYS", "WEEKLY_SUMMARY_PROP_KEYS"]; // JS の定数名はプロパティ名ではないので除外
+const implementedKeys = new Set();
+for (const m of combinedCode.matchAll(
+  /^const\s+(?:PROP_KEYS|WEEKLY_SUMMARY_PROP_KEYS)\s*=\s*\{([^}]*)\}/gm,
+)) {
+  for (const v of m[1].matchAll(/"([A-Z][A-Z0-9_]*)"/g)) implementedKeys.add(v[1]);
+}
+
+// README は全プロパティ、design doc は WEEKLY_SUMMARY_* のみ必須（現行スコープ）。
+// 新しいドキュメントがプロパティを書き始めたら、この表に 1 行足す。
+const DOC_SCOPES = [
+  { file: "README.md", required: () => true },
+  { file: "docs/weekly-summary-design.md", required: (key) => key.startsWith("WEEKLY_SUMMARY_") },
+];
+
+for (const { file, required } of DOC_SCOPES) {
+  if (!fs.existsSync(file)) continue;
+  const documented = new Set(
+    [...fs.readFileSync(file, "utf-8").matchAll(/`([A-Z][A-Z0-9_]*)`/g)]
+      .map((m) => m[1])
+      .filter((name) => !PROP_KEY_CONSTS.includes(name)),
+  );
+
+  for (const key of implementedKeys) {
+    if (required(key) && !documented.has(key)) {
+      console.error(`Undocumented script property: "${key}" is missing from ${file}`);
+      hasError = true;
+    }
+  }
+  for (const name of documented) {
+    if (!implementedKeys.has(name)) {
+      console.error(`Unknown script property: "${name}" in ${file} is not defined in gas/*.gs`);
+      hasError = true;
+    }
+  }
+}
+
 if (hasError) {
   console.error("GAS check failed.");
   process.exit(1);
 } else {
   console.log(
-    `GAS check passed: ${declaredFunctions.size} functions, ${declaredVariables.size} top-level variables verified.`,
+    `GAS check passed: ${declaredFunctions.size} functions, ${declaredVariables.size} top-level variables, ` +
+      `${implementedKeys.size} script properties documented.`,
   );
 }
