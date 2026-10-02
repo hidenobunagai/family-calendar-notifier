@@ -139,8 +139,8 @@ A new feature has been added to send a weekly summary of upcoming events every S
 1. **Enable / disable**: The feature is enabled by default. To disable it, set the script property `WEEKLY_SUMMARY_ENABLED` to `false` (no need to set `true`).
 2. **Configure schedule** (optional):
    - `WEEKLY_SUMMARY_DAY`: 0 for Sunday (default), 1 for Monday, etc.
-   - `WEEKLY_SUMMARY_HOUR`: Hour in 24h format (default: 18 for 6 PM).
-   - `WEEKLY_SUMMARY_MINUTE`: Minute of the hour (0-59, default: 0).
+   - `WEEKLY_SUMMARY_HOUR`: Hour in 24h format (default: 18 for 6 PM). Out-of-range values are clamped to 0-23.
+   - `WEEKLY_SUMMARY_MINUTE`: Minute of the hour (0-59, default: 0). Out-of-range values are clamped to 0-59.
 3. **Install the trigger**: Run the `installWeeklySummaryTrigger()` function once to set up the weekly trigger.
 
 `WEEKLY_SUMMARY_LAST_SENT` is auto-managed to prevent duplicate sends; no manual setup is needed.

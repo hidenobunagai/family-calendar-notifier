@@ -244,13 +244,35 @@ function formatWeeklySummary(events, startDate, endDate, tz) {
   
   return summary;
 }
+/**
+ * 時・分のプロパティ値を範囲内に収める。
+ * `.atHour()` / `.nearMinute()` は範囲外の値で例外を投げるため、
+ * 設定ミス（例: WEEKLY_SUMMARY_HOUR=99）でもトリガーを作れるようクランプする。
+ * 非数値は既定値へフォールバックし、どちらの場合も logWarn に残す。
+ */
+function clampTimeProp(props, key, fallback, min, max) {
+  const raw = props.getProperty(key);
+  const parsed = parseInt(raw, 10);
+
+  if (Number.isNaN(parsed)) {
+    if (raw) logWarn(`${key} ("${raw}") が数値でないため既定値 ${fallback} を使用します。`);
+    return fallback;
+  }
+
+  const clamped = Math.min(Math.max(parsed, min), max);
+  if (clamped !== parsed) {
+    logWarn(`${key} (${parsed}) は ${min}-${max} の範囲外のため ${clamped} に丸めました。`);
+  }
+  return clamped;
+}
+
 function installWeeklySummaryTrigger() {
   const props = PropertiesService.getScriptProperties();
-  
+
   // Default to Sunday at 18:00 if not configured
   const dayOfWeek = parseInt(props.getProperty(WEEKLY_SUMMARY_PROP_KEYS.dayOfWeek) || "0", 10);
-  const hour = parseInt(props.getProperty(WEEKLY_SUMMARY_PROP_KEYS.hour) || "18", 10);
-  const minute = parseInt(props.getProperty(WEEKLY_SUMMARY_PROP_KEYS.minute) || "0", 10);
+  const hour = clampTimeProp(props, WEEKLY_SUMMARY_PROP_KEYS.hour, 18, 0, 23);
+  const minute = clampTimeProp(props, WEEKLY_SUMMARY_PROP_KEYS.minute, 0, 0, 59);
   
   // Remove existing weekly summary triggers
   const triggers = ScriptApp.getProjectTriggers();
