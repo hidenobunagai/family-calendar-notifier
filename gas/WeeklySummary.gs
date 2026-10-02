@@ -188,52 +188,128 @@ function listCalendarEventsRange(calendarId, timeMin, timeMax, pageToken) {
 /**
  * Format weekly summary message
  */
+/**
+ * イベントが対象とする日付文字列 (yyyy-MM-dd) の配列を返す。
+ * 複数日にまたがる予定（終日または日時指定）を各日に展開するために使用。
+ */
+function getEventDates(ev, tz) {
+  // 終日イベント (start.date, end.date)
+  if (ev.start && ev.start.date) {
+    const dates = [];
+    const startStr = ev.start.date;
+    const endDate = ev.end && ev.end.date ? new Date(ev.end.date) : new Date(startStr);
+    const cur = new Date(startStr);
+    while (cur < endDate) {
+      dates.push(Utilities.formatDate(cur, tz, "yyyy-MM-dd"));
+      cur.setDate(cur.getDate() + 1);
+    }
+    return dates.length ? dates : [startStr];
+  }
+
+  // 時間指定イベント (start.dateTime, end.dateTime)
+  if (ev.start && ev.start.dateTime) {
+    const start = new Date(ev.start.dateTime);
+    const end = ev.end && ev.end.dateTime ? new Date(ev.end.dateTime) : start;
+
+    const startDayStr = Utilities.formatDate(start, tz, "yyyy-MM-dd");
+    const endDayStr = Utilities.formatDate(end, tz, "yyyy-MM-dd");
+
+    if (startDayStr === endDayStr) {
+      return [startDayStr];
+    }
+
+    const dates = [];
+    const cur = new Date(startDayStr);
+    const endDay = new Date(endDayStr);
+    const isMidnightEnd = Utilities.formatDate(end, tz, "HH:mm") === "00:00";
+
+    while (cur <= endDay) {
+      if (cur.getTime() === endDay.getTime() && isMidnightEnd) {
+        break;
+      }
+      dates.push(Utilities.formatDate(cur, tz, "yyyy-MM-dd"));
+      cur.setDate(cur.getDate() + 1);
+    }
+    return dates.length ? dates : [startDayStr];
+  }
+
+  return [];
+}
+
 // New version that includes all days, showing 予定なし for empty days
 function formatWeeklySummary(events, startDate, endDate, tz) {
-  const dayNames = ['日', '月', '火', '水', '木', '金', '土'];
-  
-  // Group events by date
+  const dayNames = ["日", "月", "火", "水", "木", "金", "土"];
+
+  // Group events by date (supporting multi-day events)
   const eventsByDate = {};
-  events.forEach(ev => {
-    const start = ev.start.dateTime || ev.start.date;
-    const date = new Date(start);
-    const dateStr = Utilities.formatDate(date, tz, 'yyyy-MM-dd');
-    if (!eventsByDate[dateStr]) {
-      eventsByDate[dateStr] = [];
-    }
-    eventsByDate[dateStr].push(ev);
+  events.forEach((ev) => {
+    const coveredDates = getEventDates(ev, tz);
+    const isMultiDay = coveredDates.length > 1;
+    coveredDates.forEach((dateStr, idx) => {
+      if (!eventsByDate[dateStr]) {
+        eventsByDate[dateStr] = [];
+      }
+      eventsByDate[dateStr].push({
+        event: ev,
+        dayIndex: idx + 1,
+        totalDays: coveredDates.length,
+        isMultiDay: isMultiDay,
+      });
+    });
   });
-  
+
   // Days covered by the summary. endDate is exclusive, so this is exactly 7 days, and
   // the header and the day headings are both derived from this single list.
   const days = [];
   for (let d = new Date(startDate); d < endDate; d.setDate(d.getDate() + 1)) {
     days.push(new Date(d));
   }
-  
+
   // Build header
-  const startStr = Utilities.formatDate(days[0], tz, 'yyyy/MM/dd');
-  const endStr = Utilities.formatDate(days[days.length - 1], tz, 'yyyy/MM/dd');
+  const startStr = Utilities.formatDate(days[0], tz, "yyyy/MM/dd");
+  const endStr = Utilities.formatDate(days[days.length - 1], tz, "yyyy/MM/dd");
   let summary = `📅 今週の予定 (Weekly Plan)\n`;
   summary += `${startStr} - ${endStr}\n`;
-  summary += '━━━━━━━━━━━━━━━━━━━━━━━━\n';
-  
+  summary += "━━━━━━━━━━━━━━━━━━━━━━━━\n";
+
   let eventCount = 0;
-  days.forEach(day => {
-    const dateStr = Utilities.formatDate(day, tz, 'yyyy-MM-dd');
+  days.forEach((day) => {
+    const dateStr = Utilities.formatDate(day, tz, "yyyy-MM-dd");
     const dayOfWeek = day.getDay();
-    
+
     summary += `\n【${dayNames[dayOfWeek]}曜日】\n`;
-    
+
     if (eventsByDate[dateStr] && eventsByDate[dateStr].length > 0) {
-      eventsByDate[dateStr].forEach(ev => {
-        const start = ev.start.dateTime || ev.start.date;
-        const time = ev.start.dateTime ? 
-          Utilities.formatDate(new Date(start), tz, 'HH:mm') : 
-          '終日';
-        const summary_text = ev.summary || '(タイトルなし)';
+      eventsByDate[dateStr].forEach(({ event: ev, dayIndex, totalDays, isMultiDay }) => {
+        let time;
+        if (ev.start.dateTime) {
+          const evStart = new Date(ev.start.dateTime);
+          const evEnd = ev.end && ev.end.dateTime ? new Date(ev.end.dateTime) : null;
+          const evStartDateStr = Utilities.formatDate(evStart, tz, "yyyy-MM-dd");
+          const evEndDateStr = evEnd ? Utilities.formatDate(evEnd, tz, "yyyy-MM-dd") : evStartDateStr;
+
+          if (isMultiDay) {
+            if (dateStr === evStartDateStr) {
+              time = `${Utilities.formatDate(evStart, tz, "HH:mm")}〜`;
+            } else if (dateStr === evEndDateStr) {
+              time = `〜${Utilities.formatDate(evEnd, tz, "HH:mm")}`;
+            } else {
+              time = "終日";
+            }
+          } else {
+            time = Utilities.formatDate(evStart, tz, "HH:mm");
+          }
+        } else {
+          time = "終日";
+        }
+
+        let summary_text = ev.summary || "(タイトルなし)";
+        if (isMultiDay) {
+          summary_text += ` (${dayIndex}/${totalDays}日目)`;
+        }
+
         summary += `• ${time} - ${summary_text}\n`;
-        
+
         if (ev.location) {
           summary += `  📍 ${ev.location}\n`;
         }
@@ -243,11 +319,11 @@ function formatWeeklySummary(events, startDate, endDate, tz) {
       summary += `• 予定なし\n`;
     }
   });
-  
+
   // Footer
-  summary += '\n━━━━━━━━━━━━━━━━━━━━━━━━\n';
+  summary += "\n━━━━━━━━━━━━━━━━━━━━━━━━\n";
   summary += `合計: ${eventCount}件の予定`;
-  
+
   return summary;
 }
 /**
