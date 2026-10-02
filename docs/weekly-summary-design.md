@@ -79,5 +79,5 @@
 - [x] Implement `sendWeeklySummary()` function: `gas/WeeklySummary.gs` に実装完了（Google カレンダーから翌7日間の予定を取得して整形・送信）
 - [x] Add configuration properties: `gas/WeeklySummary.gs` に `WEEKLY_SUMMARY_PROP_KEYS`（enabled, dayOfWeek, hour, minute, lastSentAt）を定義完了
 - [x] Set up weekly trigger: `gas/WeeklySummary.gs` に設定値（曜日・時・分）を反映する `installWeeklySummaryTrigger()` / `uninstallWeeklySummaryTrigger()` を実装完了
-- [x] Test with sample data: 見出し 7 日分の一致と予定 0 件時の送信経路を確認済み（リポジトリ内に自動テストは無く、検証はリポジトリ外の使い捨てスタブで実施）
+- [x] Test with sample data: 見出し 7 日分の一致と予定 0 件時の送信経路を確認済み（`bun run test` = `scripts/weekly-summary-test.mjs` が `formatWeeklySummary` の出力をこのドキュメントのサンプルとバイト一致で固定する。GAS API はスタブで、送信はしない）
 - [x] Update README with setup instructions: `README.md` の「Weekly Summary Feature」セクションにセットアップ手順およびプロパティ説明を記載完了

@@ -44,12 +44,18 @@ clasp push
 clasp open
 ```
 
-## 検証（静的チェック）
+## 検証（静的チェック・テスト）
 
 GAS コードの構文検査、トップレベル識別子の重複チェック、未定義グローバル参照の簡易検査を実行できます。
 
 ```sh
 bun run check
+```
+
+週次サマリの純関数（トリガーの曜日解決・`formatWeeklySummary` の出力）は `node:vm` で `gas/*.gs` を読み込み、GAS API をすべてスタブして検証します。doc のサンプルとバイト一致も確認します。外部送信は発生しません。
+
+```sh
+bun run test
 ```
 
 ## Google Calendar API 有効化

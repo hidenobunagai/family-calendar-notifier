@@ -18,3 +18,5 @@ jobs:
           bun-version: 1.4.0
       # Dependency-free GAS static check (syntax + undeclared calls); no install needed.
       - run: bun run check
+      # Weekly summary pure-function harness (node:vm + GAS API stubs; sends nothing).
+      - run: bun run test
