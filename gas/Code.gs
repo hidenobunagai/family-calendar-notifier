@@ -88,8 +88,8 @@ function pollCalendarAndNotify() {
       updates = fetchCalendarUpdates(calendarId, lastCheckedIso);
     } catch (err) {
       logError("Calendar API 呼び出しに失敗しました。設定や権限を確認してください。", err);
-      // エラー時も時刻を進めて長期間の重複通知を防ぐ
-      props.setProperty(PROP_KEYS.lastCheckedAt, nowIso);
+      // LAST_CHECKED_AT は進めない: 次回成功時に同じ範囲を取り直す（通知済みは NOTIFIED_CACHE で弾かれる）。
+      // 失敗が 6 時間を超えれば computeLastCheckedDate の上限処理が取りこぼしを WARN + 注記で知らせる
       notifyFailureOnce(props, "カレンダーの取得に失敗しました（Calendar API エラー）");
       throw err;
     }
