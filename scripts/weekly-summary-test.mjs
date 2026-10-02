@@ -83,8 +83,13 @@ function pinnedDateClass(fixedMs) {
   return PinnedDate;
 }
 
-/** gas/*.gs を連結して 1 つの vm コンテキストとして評価する */
-function loadGas(props, { dateMs = null, counter = null } = {}) {
+/**
+ * gas/*.gs を連結して 1 つの vm コンテキストとして評価する。
+ * lineStatus は LINE push の応答コード。数値、または push の本文 (payload) から
+ * コードを返す関数（例: サマリー本文だけ 500 を返す = 一時的な送信障害の模擬）。
+ * Calendar API は 200 + 予定 0 件を返す。送信件数は counter で数えるだけ。
+ */
+function loadGas(props, { dateMs = null, counter = null, lineStatus = 200 } = {}) {
   const source = fs
     .readdirSync(gasDir)
     .filter((f) => f.endsWith(".gs"))
@@ -96,10 +101,28 @@ function loadGas(props, { dateMs = null, counter = null } = {}) {
     ScriptApp: scriptAppStub(),
     Session: { getScriptTimeZone: () => TZ },
     Utilities: utilitiesStub,
-    // Calendar API は 200 + 予定 0 件、LINE push は 200 を返すだけ（送信件数は数えるだけ）
     UrlFetchApp: {
-      fetch: (url) => {
-        if (url.includes("line.me")) counter.sends++;
+      fetch: (url, options) => {
+        const payload = String((options && options.payload) || "");
+        const isLine = url.includes("line.me");
+        const code = isLine
+          ? typeof lineStatus === "function"
+            ? lineStatus(payload)
+            : lineStatus
+          : 200;
+        // 届いた数を数える（200 応答のみ。失敗した push は delivery に数えない）
+        if (isLine && counter && code === 200) {
+          // 週次サマリー本文と失敗通知本文を区別して数える
+          if (payload.includes("📅 今週の予定")) counter.sends++;
+          else if (payload.includes("家族カレンダー通知の実行に失敗")) counter.warnings++;
+        }
+        if (code !== 200) {
+          return {
+            getResponseCode: () => code,
+            getContentText: () => '{"message":"stub failure"}',
+            getHeaders: () => ({}),
+          };
+        }
         return {
           getResponseCode: () => 200,
           getContentText: () => JSON.stringify({ items: [] }),
@@ -199,13 +222,18 @@ const SEND_PROPS = {
 };
 
 /** 指定した JST 時刻で sendWeeklySummary() を 2 回走らせ、送信回数を数える */
-function countSends(clockTimes, initial = {}) {
+function countSends(clockTimes, initial = {}, lineStatus = 200) {
   const props = propsStub({ ...SEND_PROPS, ...initial });
-  const counter = { sends: 0 };
+  const counter = { sends: 0, warnings: 0 };
   for (const iso of clockTimes) {
-    loadGas(props, { dateMs: new Date(iso).getTime(), counter }).sendWeeklySummary();
+    loadGas(props, { dateMs: new Date(iso).getTime(), counter, lineStatus }).sendWeeklySummary();
   }
-  return { sends: counter.sends, lastSent: props.getProperty("WEEKLY_SUMMARY_LAST_SENT") };
+  return {
+    sends: counter.sends,
+    warnings: counter.warnings,
+    lastSent: props.getProperty("WEEKLY_SUMMARY_LAST_SENT"),
+    failureNotifiedAt: props.getProperty("LAST_FAILURE_NOTIFIED_AT"),
+  };
 }
 
 for (const [label, t1, t2] of [
@@ -235,6 +263,64 @@ check("前日の保存値なら送信する", () => {
   assert.equal(countSends(["2026-09-18T18:00:00+09:00"], {
     WEEKLY_SUMMARY_LAST_SENT: "2026-09-16T09:00:00.000Z", // JST 2026-09-16 18:00
   }).sends, 1);
+});
+
+// --- ⑤ 送信失敗を記録しない（復旧後の同日再送） --------------------------------
+// WEEKLY_SUMMARY_LAST_SENT は実際の送信成功だけを「送信済み」とみなす。
+// 全チャネルが失敗した日を記録すると、復旧後に当日中の再送が
+// 「already sent today」で永久に弾かれる。
+// 障害の模擬は「週次サマリー本文だけ 500、失敗通知は 200」で行う。
+// これにより (a) 本体の失敗でも (b) 失敗通知自体も落ちるケースでも
+// 「送信 0 件 -> LAST_SENT を立てない -> 復旧後に送信」を観測できる。
+const isSummary = (p) => p.includes("📅 今週の予定");
+const summaryFails = (p) => (isSummary(p) ? 500 : 200);
+
+check("送信失敗時は WEEKLY_SUMMARY_LAST_SENT を立てない", () => {
+  const r = countSends(["2026-09-20T18:00:00+09:00"], {}, summaryFails);
+  assert.equal(r.sends, 0);
+  assert.equal(r.lastSent, null);
+});
+
+// 失敗通知も 500 = 本体も警告も届かない最悪ケース。記録も残らない
+check("全チャネルが 500: 何も記録しない", () => {
+  const r = countSends(["2026-09-20T18:00:00+09:00"], {}, () => 500);
+  assert.equal(r.sends, 0);
+  assert.equal(r.warnings, 0);
+  assert.equal(r.lastSent, null);
+  assert.equal(r.failureNotifiedAt, null);
+});
+
+check("全チャネル失敗 -> 復旧 -> 同日再実行で送信される", () => {
+  const t = (hhmm) => `2026-09-20T${hhmm}:00+09:00`;
+  const props = propsStub({ ...SEND_PROPS });
+  const counter = { sends: 0, warnings: 0 };
+  const run = (hhmm, lineStatus = summaryFails) =>
+    loadGas(props, { dateMs: new Date(t(hhmm)).getTime(), counter, lineStatus }).sendWeeklySummary();
+
+  // 18:00 と 18:05: 両方とも送信失敗。失敗通知は 1 通だけ（成功后まで再送しない既存仕様）
+  run("18:00");
+  assert.equal(counter.sends, 0);
+  assert.equal(counter.warnings, 1);
+  assert.ok(props.getProperty("LAST_FAILURE_NOTIFIED_AT"), "失敗通知を記録する");
+  assert.equal(props.getProperty("WEEKLY_SUMMARY_LAST_SENT"), null, "失敗した日は記録しない");
+
+  run("18:05");
+  assert.equal(counter.sends, 0);
+  assert.equal(counter.warnings, 1, "失敗通知は再送しない");
+  assert.equal(props.getProperty("WEEKLY_SUMMARY_LAST_SENT"), null);
+
+  // 19:00: チャネル復旧後の同日再実行。送られ、送信済みとなり、警告フラグも消える
+  run("19:00", 200);
+  assert.equal(counter.sends, 1);
+  assert.equal(props.getProperty("WEEKLY_SUMMARY_LAST_SENT"), "2026-09-20");
+  assert.equal(props.getProperty("LAST_FAILURE_NOTIFIED_AT"), null, "成功で警告フラグを消す");
+
+  // 19:30: 送信後の再実行。1 日 1 回への丸め（既存仕様）に従って
+  // 本体も警告も一切再送しない。記録も上書きしない。
+  run("19:30");
+  assert.equal(counter.sends, 1, "成功した日は再送しない");
+  assert.equal(counter.warnings, 1, "送信済みの日は警告も再送しない");
+  assert.equal(props.getProperty("WEEKLY_SUMMARY_LAST_SENT"), "2026-09-20");
 });
 
 if (failed > 0) {

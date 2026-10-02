@@ -107,12 +107,14 @@ function sendWeeklySummary() {
   const delivered = lineOk;
   if (delivered) {
     clearFailureNotification(props);
+    // 送信済みであることを記録する。判定と同じ基準（スクリプトタイムゾーンの日付）で保存する。
+    // 送信できたときだけ記録し、失敗した日は記録しない。記録すると
+    // 復旧後に当日の再実行が「already sent today」で弾かれ、送り直しできなくなる。
+    props.setProperty(WEEKLY_SUMMARY_PROP_KEYS.lastSentAt, today);
   } else {
     notifyFailureOnce(props, "週次サマリーの送信に失敗しました（LINE 送信エラー）");
   }
 
-  // 送信済みであることを記録する。判定と同じ基準（スクリプトタイムゾーンの日付）で保存する。
-  props.setProperty(WEEKLY_SUMMARY_PROP_KEYS.lastSentAt, today);
   logInfo("Weekly summary generation complete.");
 }
 
