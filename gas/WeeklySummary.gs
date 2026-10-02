@@ -90,6 +90,12 @@ function sendWeeklySummary() {
   const messages = [summary];
   let lineOk = true;
 
+  if (isDebugMode(props)) {
+    logInfo(`[DRY-RUN] 週次サマリーを LINE へ送信予定（DEBUG_MODE=ON）:\n${summary}`);
+    logInfo("Weekly summary generation complete (dry run).");
+    return;
+  }
+
   try {
     postToLine(lineChannelAccessToken, lineTargetId, messages);
     logInfo("Weekly summary sent to LINE.");
