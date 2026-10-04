@@ -1,42 +1,42 @@
 # Family Calendar Notifier (GAS + clasp)
 
-共有カレンダーの新規・更新・キャンセルを定期ポーリングで検知し、LINE Messaging API に投稿する Google Apps Script プロジェクトです。Google Calendar API (v3) の REST エンドポイントを直接呼び出します。
+A Google Apps Script project that detects new, updated, and cancelled events on a shared calendar by polling periodically, and posts them to the LINE Messaging API. It calls the Google Calendar API (v3) REST endpoints directly.
 
-## 構成
+## Structure
 
-- `gas/appsscript.json`: マニフェスト（スコープ定義 / タイムゾーン）
-- `gas/Code.gs`: 差分取得・LINE 送信・トリガー
-- `gas/Utils.gs`: メッセージ整形ユーティリティ
-- `gas/WeeklySummary.gs`: 週次サマリー通知・トリガー
+- `gas/appsscript.json`: Manifest (scope definitions / time zone)
+- `gas/Code.gs`: Diff fetching, LINE sending, triggers
+- `gas/Utils.gs`: Message formatting utilities
+- `gas/WeeklySummary.gs`: Weekly summary notifications and trigger
 
-## .clasp.json について（重要）
+## About .clasp.json (important)
 
-- `.clasp.json` はローカル用設定ファイルのため、Git には含めません（`.gitignore` 済み）。
-- 代わりに `.clasp.example.json` を同梱し、フォーマットを公開しています。
-- 初回セットアップ手順:
-  1. コピー: macOS/Linux `cp .clasp.example.json .clasp.json`、Windows `copy .clasp.example.json .clasp.json`
-  2. `scriptId` をご自身の Apps Script の ID に置き換える
-  3. `rootDir` は `"gas"` のままで OK
-- `scriptId` の確認方法: Apps Script エディタ →「プロジェクトの設定」→「スクリプト ID」。
+- `.clasp.json` is a local configuration file, so it is not included in Git (already in `.gitignore`).
+- Instead, `.clasp.example.json` is bundled and the format is published.
+- Initial setup steps:
+  1. Copy: macOS/Linux `cp .clasp.example.json .clasp.json`, Windows `copy .clasp.example.json .clasp.json`
+  2. Replace `scriptId` with your own Apps Script ID
+  3. `rootDir` can stay as `"gas"`
+- How to find `scriptId`: Apps Script editor → "Project Settings" → "Script ID".
 
-## 前提
+## Prerequisites
 
-1. Node.js（最新版推奨、clasp の実行に必要）
-2. `bun add -g @google/clasp` でインストール
-3. `clasp login` で認証
-4. 対象 Google カレンダーの ID を控える（カレンダーの設定 → カレンダーの統合）
-5. （LINE 通知を使う場合）LINE 公式アカウントを作成し、Messaging API チャネルの「チャネルアクセストークン」と送信先のユーザー / グループ / トークルーム ID を控える
+1. Node.js (latest version recommended, required to run clasp)
+2. Install with `bun add -g @google/clasp`
+3. Authenticate with `clasp login`
+4. Note the ID of the target Google Calendar (Calendar settings → Integrate calendar)
+5. (If using LINE notifications) Create a LINE Official Account and note the "Channel access token" of the Messaging API channel and the destination user / group / room ID
 
-## セットアップとデプロイ
+## Setup and deployment
 
-`.clasp.json` を用意済みなら、以下でプロジェクトへ反映できます。
+If `.clasp.json` is ready, you can apply the changes to the project with the following.
 
 ```sh
 clasp push
 clasp open
 ```
 
-新規に別スクリプトへ作成したい場合は以下（任意）。
+If you want to create a new, separate script, use the following (optional).
 
 ```sh
 clasp create --title "Family Calendar Notifier" --type standalone --rootDir ./gas
@@ -44,97 +44,97 @@ clasp push
 clasp open
 ```
 
-## 検証（静的チェック・テスト）
+## Verification (static checks and tests)
 
-GAS コードの構文検査、トップレベル識別子の重複チェック、未定義グローバル参照の簡易検査を実行できます。
+You can run syntax checks on the GAS code, duplicate top-level identifier checks, and a simple check for undefined global references.
 
 ```sh
 bun run check
 ```
 
-週次サマリの純関数（トリガーの曜日解決・`formatWeeklySummary` の出力）は `node:vm` で `gas/*.gs` を読み込み、GAS API をすべてスタブして検証します。doc のサンプルとバイト一致も確認します。外部送信は発生しません。
+The weekly summary pure functions (trigger weekday resolution and the output of `formatWeeklySummary`) are verified by loading `gas/*.gs` with `node:vm` and stubbing every GAS API. A byte-for-byte match with the documented sample is also checked. No external requests are made.
 
 ```sh
 bun run test
 ```
 
-## Google Calendar API 有効化
+## Enabling the Google Calendar API
 
-- Apps Script エディタ右上の「プロジェクトの設定」→「Google Cloud プロジェクトを表示」で紐づく Cloud プロジェクトを開き、Google Calendar API を有効化してください。
-- 既存のプロジェクトにリンクしていない場合は、同画面の「Google Cloud プロジェクトを変更」から任意のプロジェクトに関連付けて API を有効化します。
+- Open the Cloud project linked to the script from "Project Settings" → "View Google Cloud project" at the top right of the Apps Script editor, and enable the Google Calendar API.
+- If it is not linked to an existing project, use "Change Google Cloud project" on the same screen to associate it with a project of your choice, then enable the API.
 
-## Script Properties（必須 / 任意）
+## Script Properties (required / optional)
 
-- `CALENDAR_ID`: 対象のカレンダー ID（必須）
-- `LINE_CHANNEL_ACCESS_TOKEN`: LINE Messaging API のチャネルアクセストークン（必須）
-- `LINE_TARGET_ID`: LINE の送信先 ID（ユーザー / グループ / トークルーム ID。必須）
-- `LAST_CHECKED_AT`: 任意（初回取りこぼし防止。未設定時は現在時刻から 6 時間巻き戻し。6 時間より古い値は 6 時間前に丸める）
-- `NOTIFIED_CACHE`: 自動管理（重複通知防止キャッシュ。手動設定不要）
-- `LAST_FAILURE_NOTIFIED_AT`: 自動管理（実行失敗の警告を 1 回だけ送るためのタイムスタンプ。次回成功時に自動削除。手動設定不要）
-- `DEBUG_MODE`: 任意（`true` にすると実際の投稿をスキップし、ログのみ出力。デプロイ前の動作確認用）
+- `CALENDAR_ID`: The target calendar ID (required)
+- `LINE_CHANNEL_ACCESS_TOKEN`: The channel access token of the LINE Messaging API (required)
+- `LINE_TARGET_ID`: The LINE destination ID (user / group / room ID; required)
+- `LAST_CHECKED_AT`: Optional (prevents missing events on the first run. When unset, it starts 6 hours back from the current time. Values older than 6 hours are rounded to 6 hours ago)
+- `NOTIFIED_CACHE`: Auto-managed (cache to prevent duplicate notifications; no manual setup needed)
+- `LAST_FAILURE_NOTIFIED_AT`: Auto-managed (timestamp used to send the execution failure warning only once; automatically deleted on the next success. No manual setup needed)
+- `DEBUG_MODE`: Optional (when set to `true`, actual posting is skipped and only logs are output. For pre-deployment testing)
 
-通知先の有効条件:
+Conditions for notification destinations:
 
-- LINE: `LINE_CHANNEL_ACCESS_TOKEN` と `LINE_TARGET_ID` が両方設定されていれば送信
-- 未設定の場合は警告ログを出力して中断します。
+- LINE: sent when both `LINE_CHANNEL_ACCESS_TOKEN` and `LINE_TARGET_ID` are set
+- If they are not set, a warning is logged and the run aborts.
 
-設定は Apps Script の「プロジェクトの設定」→「スクリプト プロパティ」から行うか、任意の一時関数で `PropertiesService.getScriptProperties().setProperty(key, value)` を実行してください。
+Configure these from "Project Settings" → "Script Properties" in Apps Script, or by running `PropertiesService.getScriptProperties().setProperty(key, value)` in any temporary function.
 
-## 使い方
+## Usage
 
-1. `pollCalendarAndNotify()` を一度手動実行して権限承認
-2. `installTrigger()` を実行して 5 分間隔のトリガーを作成
-3. 以後、自動で差分検知 →LINE 投稿が行われます
+1. Run `pollCalendarAndNotify()` manually once to approve permissions
+2. Run `installTrigger()` to create a trigger at 5-minute intervals
+3. After that, diff detection → LINE posting happens automatically
 
-## 動作の要点
+## How it works
 
-- 実行ロック: 前回の実行が継続中の場合、重複実行をスキップ（10分で自動解除）
-- 差分取得: `updatedMin` を使用し、前回チェック時刻から 60 秒巻き戻して取得。`updatedMin` が古すぎると Calendar API が 410 を返すため遡り幅は最大 6 時間で、記録された `LAST_CHECKED_AT` がそれより古い場合（トリガー停止など）は 6 時間前に丸めたうえで、捨てた期間を WARN ログと次の通知の 1 行注記で明示
-- Calendar API リトライ: 一時的なエラー時に最大 3 回のリトライ
-- 変更判定: 新規/更新/キャンセルを分類
-- LINE 投稿: 1 メッセージあたり 5000 文字制限に配慮して分割し、1 push につき最大 5 メッセージまでまとめて送信。429 時は `Retry-After` ヘッダに従いリトライ、401/400 は即時例外
-- 通知済みキャッシュ: LINE 送信成功時に記録し、次回以降の重複通知を防止
-- タイムゾーン: `Asia/Tokyo`（`appsscript.json` で変更可）
+- Execution lock: if the previous run is still in progress, duplicate runs are skipped (automatically released after 10 minutes)
+- Diff fetching: uses `updatedMin` and looks back 60 seconds from the last check time. Because the Calendar API returns 410 when `updatedMin` is too old, the look-back window is capped at 6 hours; if the recorded `LAST_CHECKED_AT` is older than that (for example when triggers have stopped), it is rounded to 6 hours ago and the discarded period is made explicit in a WARN log and a one-line note in the next notification
+- Calendar API retries: up to 3 retries on transient errors
+- Change classification: classifies events as new / updated / cancelled
+- LINE posting: messages are split to respect the 5,000-character limit per message, and up to 5 messages are sent together per push. On 429 it retries according to the `Retry-After` header; 401/400 raise immediately
+- Notified cache: recorded when a LINE send succeeds, preventing duplicate notifications afterwards
+- Time zone: `Asia/Tokyo` (changeable in `appsscript.json`)
 
-## ドライランモード
+## Dry-run mode
 
-`DEBUG_MODE` スクリプトプロパティを `true` に設定すると、各チャネルへの実際の投稿を行わず、送信予定のメッセージをログに出力します。
+Setting the `DEBUG_MODE` script property to `true` skips actual posting to each channel and logs the messages that would be sent instead.
 
-- 設定: スクリプトプロパティ `DEBUG_MODE` = `true`
-- 動作: カレンダーの差分取得・キャッシュ更新は通常通り行い、LINE 投稿のみスキップ
-- 用途: デプロイ前の動作確認や、通知を一時的に止めたい場合
-- 元に戻す: `DEBUG_MODE` を削除するか `false` に設定
+- Setting: script property `DEBUG_MODE` = `true`
+- Behavior: calendar diff fetching and cache updates proceed as usual; only LINE posting is skipped
+- Use cases: pre-deployment testing, or temporarily stopping notifications
+- Reverting: delete `DEBUG_MODE` or set it to `false`
 
-## LINE Messaging API のセットアップ
+## LINE Messaging API setup
 
-> **注意**: 旧来の LINE Notify は 2025/3 に廃止されたため、本プロジェクトでは LINE Messaging API（公式アカウント経由の push メッセージ）を使用します。
+> **Note**: The legacy LINE Notify was discontinued in March 2025, so this project uses the LINE Messaging API (push messages via an official account).
 
-1. [LINE Developers](https://developers.line.biz/) でプロバイダーと Messaging API チャネルを作成
-2. チャネルの「Messaging API 設定」で「チャネルアクセストークン」を発行し、控える
-3. 通知を受け取りたい LINE アカウント（自分自身や家族グループ）を公式アカウントと友だち追加
-4. 送信先 ID を確認:
-   - 個別ユーザー: LINE Developers の「 Messaging API 設定 → グループ / トークルーム ID」や、公式アカウントにメッセージを送って `webhook` で取得する `userId` など
-   - グループ / トークルーム: 公式アカウントをグループに招待した後に同ページの「グループ / トークルーム ID」を参照
-5. Apps Script のスクリプトプロパティに `LINE_CHANNEL_ACCESS_TOKEN` と `LINE_TARGET_ID` を設定
-6. （必要なら）`DEBUG_MODE=true` でドライラン確認 → 本番運用
+1. Create a provider and a Messaging API channel on [LINE Developers](https://developers.line.biz/)
+2. Issue a "Channel access token" under the channel's "Messaging API settings" and note it
+3. Add the LINE account that should receive notifications (yourself or a family group) as a friend of the official account
+4. Check the destination ID:
+   - Individual user: from "Messaging API settings → Group / room ID" in LINE Developers, or the `userId` obtained via `webhook` by sending a message to the official account
+   - Group / room: invite the official account to the group, then refer to "Group / room ID" on the same page
+5. Set `LINE_CHANNEL_ACCESS_TOKEN` and `LINE_TARGET_ID` in the Apps Script script properties
+6. (If needed) verify with `DEBUG_MODE=true` as a dry run → then go into production
 
-### LINE の注意点
+### LINE notes
 
-- 無料枠（Light Plan）では月 1,000 メッセージまで。超過分は従量課金または送信制限されるため、通知頻度に注意
-- `push` API は友だち追加済みの相手にのみ届く。未追加ユーザーへの送信は失敗する
-- グループ / トークルームへ送る場合は公式アカウントをその部屋に招待しておく
-- アクセストークンは定期的にローテーション推奨（漏洩時は即時再発行）
+- The free tier (Light Plan) allows up to 1,000 messages per month. Excess usage is billed or blocked, so watch the notification frequency
+- The `push` API only reaches users who have added the account as a friend. Sending to users who have not added it fails
+- To send to a group / room, invite the official account to that room beforehand
+- Rotating the access token regularly is recommended (reissue immediately if it leaks)
 
-## トラブルシュート
+## Troubleshooting
 
-- 承認で止まる: GCP の OAuth 同意画面で実行アカウントをテストユーザーに追加
-- `Calendar API error (...)`: Cloud プロジェクトで Google Calendar API が有効か確認し、必要なら再承認
-- 403（スコープ不足）: `appsscript.json` に `calendar.readonly` と `script.external_request` が含まれているか確認し、手動実行で再承認
-- 投稿されない: トリガー実行履歴とログ（`Calendar diff: ...`）を確認。`DEBUG_MODE` が `true` になっていないか、LINE のプロパティが未設定でないかも確認
-- **LINE 401 Unauthorized**: チャネルアクセストークンが不正または期限切れ。再発行して `LINE_CHANNEL_ACCESS_TOKEN` を更新
-- **LINE 400 Bad Request**: `LINE_TARGET_ID` が不正、または公式アカウントと友だち追加されていない。ID の種類（ユーザー / グループ / トークルーム）と友だち追加状態を確認
-- **LINE で届かない（エラーなし）**: 無料枠（Light Plan）の月 1,000 メッセージ上限に達していないか確認。公式アカウントをグループに招待済みかも確認
-- **送信されない**: `LINE_CHANNEL_ACCESS_TOKEN` + `LINE_TARGET_ID` が未設定の場合、警告ログを出して中断する。設定すること
+- Stuck on authorization: add the executing account as a test user on the GCP OAuth consent screen
+- `Calendar API error (...)`: check whether the Google Calendar API is enabled in the Cloud project, and re-authorize if necessary
+- 403 (insufficient scope): check that `appsscript.json` includes `calendar.readonly` and `script.external_request`, then re-authorize by running manually
+- Not posted: check the trigger execution history and the logs (`Calendar diff: ...`). Also check whether `DEBUG_MODE` is `true` or the LINE properties are unset
+- **LINE 401 Unauthorized**: the channel access token is invalid or expired. Reissue it and update `LINE_CHANNEL_ACCESS_TOKEN`
+- **LINE 400 Bad Request**: `LINE_TARGET_ID` is invalid, or the recipient has not added the official account as a friend. Check the ID type (user / group / room) and the friend status
+- **Not delivered on LINE (no error)**: check whether the free tier (Light Plan) monthly limit of 1,000 messages has been reached. Also check whether the official account has been invited to the group
+- **Not sent**: when `LINE_CHANNEL_ACCESS_TOKEN` + `LINE_TARGET_ID` are unset, a warning is logged and the run aborts. Configure them
 
 ## Weekly Summary Feature
 
