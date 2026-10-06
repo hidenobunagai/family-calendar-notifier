@@ -87,9 +87,9 @@ function pinnedDateClass(fixedMs) {
  * gas/*.gs を連結して 1 つの vm コンテキストとして評価する。
  * lineStatus は LINE push の応答コード。数値、または push の本文 (payload) から
  * コードを返す関数（例: サマリー本文だけ 500 を返す = 一時的な送信障害の模擬）。
- * Calendar API は 200 + 予定 0 件を返す。送信件数は counter で数えるだけ。
+ * Calendar API は 200 + 予定 (calendarItems) を返す。送信件数は counter で数えるだけ。
  */
-function loadGas(props, { dateMs = null, counter = null, lineStatus = 200 } = {}) {
+function loadGas(props, { dateMs = null, counter = null, lineStatus = 200, calendarItems = [] } = {}) {
   const source = fs
     .readdirSync(gasDir)
     .filter((f) => f.endsWith(".gs"))
@@ -101,6 +101,12 @@ function loadGas(props, { dateMs = null, counter = null, lineStatus = 200 } = {}
     ScriptApp: scriptAppStub(),
     Session: { getScriptTimeZone: () => TZ },
     Utilities: utilitiesStub,
+    LockService: {
+      getScriptLock: () => ({
+        tryLock: () => true,
+        releaseLock: () => {},
+      }),
+    },
     UrlFetchApp: {
       fetch: (url, options) => {
         const payload = String((options && options.payload) || "");
@@ -112,9 +118,10 @@ function loadGas(props, { dateMs = null, counter = null, lineStatus = 200 } = {}
           : 200;
         // 届いた数を数える（200 応答のみ。失敗した push は delivery に数えない）
         if (isLine && counter && code === 200) {
-          // 週次サマリー本文と失敗通知本文を区別して数える
-          if (payload.includes("📅 今週の予定")) counter.sends++;
-          else if (payload.includes("家族カレンダー通知の実行に失敗")) counter.warnings++;
+          // 週次サマリー本文、差分通知本文、失敗通知本文を区別して数える
+          if (payload.includes("📅 今週の予定")) counter.sends = (counter.sends || 0) + 1;
+          else if (payload.includes("【Googleカレンダー更新】")) counter.polls = (counter.polls || 0) + 1;
+          else if (payload.includes("家族カレンダー通知の実行に失敗")) counter.warnings = (counter.warnings || 0) + 1;
         }
         if (code !== 200) {
           return {
@@ -123,9 +130,10 @@ function loadGas(props, { dateMs = null, counter = null, lineStatus = 200 } = {}
             getHeaders: () => ({}),
           };
         }
+        const items = typeof calendarItems === "function" ? calendarItems(url) : calendarItems;
         return {
           getResponseCode: () => 200,
-          getContentText: () => JSON.stringify({ items: [] }),
+          getContentText: () => JSON.stringify({ items }),
           getHeaders: () => ({}),
         };
       },
@@ -323,8 +331,192 @@ check("全チャネル失敗 -> 復旧 -> 同日再実行で送信される", ()
   assert.equal(props.getProperty("WEEKLY_SUMMARY_LAST_SENT"), "2026-09-20");
 });
 
+// --- ⑥ 差分ポーリング -------------------------------------------------------
+
+// 1. 正常系: created が LAST_CHECKED_AT より新しい予定を 1 件、LINE は 200 で返す
+check("差分ポーリング: 正常系（polls=1, LAST_CHECKED_AT 進む, キャッシュ記録）", () => {
+  const initialLastChecked = "2026-09-20T17:50:00.000Z";
+  const nowIso = "2026-09-20T18:00:00.000Z";
+  const ev = {
+    id: "event-1",
+    summary: "新しい予定",
+    created: "2026-09-20T17:55:00.000Z",
+    updated: "2026-09-20T17:55:00.000Z",
+    start: { dateTime: "2026-09-21T10:00:00+09:00" },
+    end: { dateTime: "2026-09-21T11:00:00+09:00" },
+  };
+  const props = propsStub({ ...SEND_PROPS, LAST_CHECKED_AT: initialLastChecked });
+  const counter = { sends: 0, warnings: 0, polls: 0 };
+  loadGas(props, {
+    dateMs: new Date(nowIso).getTime(),
+    counter,
+    calendarItems: [ev],
+    lineStatus: 200,
+  }).pollCalendarAndNotify();
+
+  assert.equal(counter.polls, 1);
+  assert.equal(props.getProperty("LAST_CHECKED_AT"), nowIso);
+  const cache = JSON.parse(props.getProperty("NOTIFIED_CACHE") || "{}");
+  assert.equal(cache["event-1"], ev.updated);
+});
+
+// 2〜4 は連続したシナリオ（LINE 500 失敗 -> 復旧再送 -> 3回目重複防止）
+const retryScenario = {
+  initialLastChecked: "2026-09-20T17:50:00.000Z",
+  ev: {
+    id: "event-retry",
+    summary: "再送対象の予定",
+    created: "2026-09-20T17:55:00.000Z",
+    updated: "2026-09-20T17:55:00.000Z",
+    start: { dateTime: "2026-09-21T10:00:00+09:00" },
+    end: { dateTime: "2026-09-21T11:00:00+09:00" },
+  },
+  props: null,
+  counter: null,
+};
+
+// 2. LINE 500 のとき（不具合の再現）
+check("差分ポーリング: LINE 500 失敗時に LAST_CHECKED_AT を進めずキャッシュ未記録", () => {
+  retryScenario.props = propsStub({ ...SEND_PROPS, LAST_CHECKED_AT: retryScenario.initialLastChecked });
+  retryScenario.counter = { sends: 0, warnings: 0, polls: 0 };
+  const pollFails = (p) => (p.includes("【Googleカレンダー更新】") ? 500 : 200);
+
+  loadGas(retryScenario.props, {
+    dateMs: new Date("2026-09-20T18:00:00.000Z").getTime(),
+    counter: retryScenario.counter,
+    calendarItems: [retryScenario.ev],
+    lineStatus: pollFails,
+  }).pollCalendarAndNotify();
+
+  assert.equal(retryScenario.counter.polls, 0);
+  assert.equal(retryScenario.counter.warnings, 1);
+  assert.equal(retryScenario.props.getProperty("LAST_CHECKED_AT"), retryScenario.initialLastChecked, "失敗時は LAST_CHECKED_AT を進めない");
+  const cache = JSON.parse(retryScenario.props.getProperty("NOTIFIED_CACHE") || "{}");
+  assert.equal(cache[retryScenario.ev.id], undefined, "失敗時は NOTIFIED_CACHE に記録しない");
+});
+
+// 3. 失敗から復旧したあとの再送
+check("差分ポーリング: 復旧後の再送で未送信の変更が届き、LAST_CHECKED_AT が進む", () => {
+  loadGas(retryScenario.props, {
+    dateMs: new Date("2026-09-20T18:05:00.000Z").getTime(),
+    counter: retryScenario.counter,
+    calendarItems: [retryScenario.ev],
+    lineStatus: 200,
+  }).pollCalendarAndNotify();
+
+  assert.equal(retryScenario.counter.polls, 1, "復旧後に失敗した回の変更が届く");
+  assert.equal(retryScenario.props.getProperty("LAST_CHECKED_AT"), "2026-09-20T18:05:00.000Z", "成功で LAST_CHECKED_AT が進む");
+  assert.equal(retryScenario.props.getProperty("LAST_FAILURE_NOTIFIED_AT"), null, "成功で失敗通知がクリアされる");
+});
+
+// 4. 復旧後の 3 回目の実行
+check("差分ポーリング: 復旧後の3回目実行で重複送信されない（NOTIFIED_CACHE）", () => {
+  loadGas(retryScenario.props, {
+    dateMs: new Date("2026-09-20T18:10:00.000Z").getTime(),
+    counter: retryScenario.counter,
+    calendarItems: [retryScenario.ev],
+    lineStatus: 200,
+  }).pollCalendarAndNotify();
+
+  assert.equal(retryScenario.counter.polls, 1, "同じ予定は重複通知されない");
+});
+
+// 5. DEBUG_MODE=true のとき
+check("差分ポーリング: DEBUG_MODE=true のときは LINE 送信せず LAST_CHECKED_AT は進む", () => {
+  const initialLastChecked = "2026-09-20T17:50:00.000Z";
+  const nowIso = "2026-09-20T18:00:00.000Z";
+  const ev = {
+    id: "event-debug",
+    summary: "ドライラン予定",
+    created: "2026-09-20T17:55:00.000Z",
+    updated: "2026-09-20T17:55:00.000Z",
+    start: { dateTime: "2026-09-21T10:00:00+09:00" },
+    end: { dateTime: "2026-09-21T11:00:00+09:00" },
+  };
+  const props = propsStub({ ...SEND_PROPS, LAST_CHECKED_AT: initialLastChecked, DEBUG_MODE: "true" });
+  const counter = { sends: 0, warnings: 0, polls: 0 };
+  loadGas(props, {
+    dateMs: new Date(nowIso).getTime(),
+    counter,
+    calendarItems: [ev],
+    lineStatus: 200,
+  }).pollCalendarAndNotify();
+
+  assert.equal(counter.polls, 0);
+  assert.equal(props.getProperty("LAST_CHECKED_AT"), nowIso);
+  const cache = JSON.parse(props.getProperty("NOTIFIED_CACHE") || "{}");
+  assert.equal(cache["event-debug"], ev.updated);
+});
+
+// 6. classifyChange の単体テスト
+check("classifyChange: 変更種別判定（キャンセル / 新規 / 更新 / null）", () => {
+  const ctx = loadGas(propsStub());
+  const lastCheckedIso = "2026-09-20T18:00:00.000Z";
+
+  // status: "cancelled" なら キャンセル
+  assert.equal(
+    ctx.classifyChange(
+      { status: "cancelled", created: "2026-09-20T17:00:00.000Z", updated: "2026-09-20T17:00:00.000Z" },
+      lastCheckedIso,
+    ),
+    "キャンセル",
+  );
+
+  // created > lastChecked なら 新規
+  assert.equal(
+    ctx.classifyChange(
+      { created: "2026-09-20T18:05:00.000Z", updated: "2026-09-20T18:05:00.000Z" },
+      lastCheckedIso,
+    ),
+    "新規",
+  );
+
+  // updated だけが新しければ 更新
+  assert.equal(
+    ctx.classifyChange(
+      { created: "2026-09-20T17:50:00.000Z", updated: "2026-09-20T18:05:00.000Z" },
+      lastCheckedIso,
+    ),
+    "更新",
+  );
+
+  // どちらも古ければ null
+  assert.equal(
+    ctx.classifyChange(
+      { created: "2026-09-20T17:50:00.000Z", updated: "2026-09-20T17:55:00.000Z" },
+      lastCheckedIso,
+    ),
+    null,
+  );
+});
+
+// 7. computeLastCheckedDate の単体テスト
+check("computeLastCheckedDate: 未設定・不正値・上限キャップの計算", () => {
+  const ctx = loadGas(propsStub());
+  const now = new Date("2026-09-20T18:00:00.000Z");
+  const sixHoursMs = 6 * 60 * 60 * 1000;
+  const safetyOffsetMs = 60 * 1000;
+
+  // 未設定: 6 時間前の時刻を返し、droppedMs は 0
+  const resNull = ctx.computeLastCheckedDate(null, now);
+  assert.equal(resNull.date.getTime(), now.getTime() - sixHoursMs);
+  assert.equal(resNull.droppedMs, 0);
+
+  // 不正値: 6 時間前の時刻を返し、droppedMs は 0
+  const resInvalid = ctx.computeLastCheckedDate("not-a-valid-date", now);
+  assert.equal(resInvalid.date.getTime(), now.getTime() - sixHoursMs);
+  assert.equal(resInvalid.droppedMs, 0);
+
+  // 10 時間前の値: droppedMs が約 4 時間（から 60 秒を引いた値、または巻き戻し差分）
+  const tenHoursAgo = new Date(now.getTime() - 10 * 60 * 60 * 1000).toISOString();
+  const res10h = ctx.computeLastCheckedDate(tenHoursAgo, now);
+  assert.equal(res10h.date.getTime(), now.getTime() - sixHoursMs);
+  const expectedDroppedMs = (now.getTime() - sixHoursMs) - (new Date(tenHoursAgo).getTime() - safetyOffsetMs);
+  assert.equal(res10h.droppedMs, expectedDroppedMs);
+});
+
 if (failed > 0) {
   console.error(`${failed} test(s) failed.`);
   process.exit(1);
 }
-console.log("Weekly summary tests passed.");
+console.log("GAS tests passed.");

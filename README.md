@@ -52,7 +52,7 @@ You can run syntax checks on the GAS code, duplicate top-level identifier checks
 bun run check
 ```
 
-The weekly summary pure functions (trigger weekday resolution and the output of `formatWeeklySummary`) are verified by loading `gas/*.gs` with `node:vm` and stubbing every GAS API. A byte-for-byte match with the documented sample is also checked. No external requests are made.
+The test suite verifies pure functions and notification pipelines (weekly summary triggers and formatting, calendar diff polling, change classification, timestamp look-back capping, and retry-on-failure behavior) by loading `gas/*.gs` with `node:vm` and stubbing GAS APIs. A byte-for-byte match with the documented weekly summary sample is also checked. No external requests are made.
 
 ```sh
 bun run test
@@ -92,7 +92,7 @@ Configure these from "Project Settings" → "Script Properties" in Apps Script, 
 - Diff fetching: uses `updatedMin` and looks back 60 seconds from the last check time. Because the Calendar API returns 410 when `updatedMin` is too old, the look-back window is capped at 6 hours; if the recorded `LAST_CHECKED_AT` is older than that (for example when triggers have stopped), it is rounded to 6 hours ago and the discarded period is made explicit in a WARN log and a one-line note in the next notification
 - Calendar API retries: up to 3 retries on transient errors
 - Change classification: classifies events as new / updated / cancelled
-- LINE posting: messages are split to respect the 5,000-character limit per message, and up to 5 messages are sent together per push. On 429 it retries according to the `Retry-After` header; 401/400 raise immediately
+- LINE posting: messages are split to respect the 5,000-character limit per message, and up to 5 messages are sent together per push. On 429 it retries according to the `Retry-After` header; 401/400 raise immediately. When delivery fails, `LAST_CHECKED_AT` is not advanced so that the events are retried on the next run.
 - Notified cache: recorded when a LINE send succeeds, preventing duplicate notifications afterwards
 - Time zone: `Asia/Tokyo` (changeable in `appsscript.json`)
 

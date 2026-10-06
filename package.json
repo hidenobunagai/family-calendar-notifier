@@ -4,6 +4,6 @@
   "type": "module",
   "scripts": {
     "check": "bun scripts/check-gas.mjs",
-    "test": "bun scripts/weekly-summary-test.mjs"
+    "test": "bun scripts/gas-test.mjs"
   }
 }

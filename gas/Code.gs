@@ -132,18 +132,21 @@ function pollCalendarAndNotify() {
         if (delivered) {
           newUpdates.forEach(({ ev }) => markNotified(cache, ev));
         }
-        // 重複通知防止のため、成否にかかわらずキャッシュを保存
+        // Save cache so delivered events are not redelivered; failed events remain unrecorded and will be retried
         saveNotifiedCache(props, cache);
         if (!delivered) {
           failed = true;
           logError("LINE 送信に失敗しました。");
+          logWarn("LAST_CHECKED_AT を進めず、次回に同じ範囲を取り直します。");
           notifyFailureOnce(props, "通知の送信に失敗しました（LINE 送信エラー）");
         }
       }
     }
 
-    props.setProperty(PROP_KEYS.lastCheckedAt, nowIso);
-    if (!failed) clearFailureNotification(props);
+    if (!failed) {
+      props.setProperty(PROP_KEYS.lastCheckedAt, nowIso);
+      clearFailureNotification(props);
+    }
   } catch (err) {
     logError("pollCalendarAndNotifyで予期しないエラーが発生しました: " + err.message, err);
     notifyFailureOnce(props, "予期しないエラーが発生しました: " + err.message);
@@ -297,6 +300,7 @@ function chunkMessages(messages, sep, maxLen) {
  * @param {string[]} messages 各更新の通知メッセージ配列
  */
 function postToLineInChunks(channelAccessToken, targetId, messages) {
+  // ponytail: If postToLineInChunks fails midway across multiple pushes, earlier batches may be redelivered next run. Duplication is safer than dropping notifications; record cache per-push only if needed.
   const chunks = chunkMessages(messages, "\n\n", LINE_MAX_TEXT_LENGTH);
   // LINE_MAX_MESSAGES_PER_PUSH 件ずつ 1 push にまとめて送信
   for (let i = 0; i < chunks.length; i += LINE_MAX_MESSAGES_PER_PUSH) {
