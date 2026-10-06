@@ -300,7 +300,9 @@ function chunkMessages(messages, sep, maxLen) {
  * @param {string[]} messages 各更新の通知メッセージ配列
  */
 function postToLineInChunks(channelAccessToken, targetId, messages) {
-  // ponytail: If postToLineInChunks fails midway across multiple pushes, earlier batches may be redelivered next run. Duplication is safer than dropping notifications; record cache per-push only if needed.
+  // NOTE: If this fails midway across multiple pushes, the batches already sent are not recorded
+  // in NOTIFIED_CACHE, so they may be redelivered on the next run. Duplication is safer than
+  // dropping notifications; recording the cache per-push would avoid it if it ever matters.
   const chunks = chunkMessages(messages, "\n\n", LINE_MAX_TEXT_LENGTH);
   // LINE_MAX_MESSAGES_PER_PUSH 件ずつ 1 push にまとめて送信
   for (let i = 0; i < chunks.length; i += LINE_MAX_MESSAGES_PER_PUSH) {
