@@ -89,7 +89,7 @@ function pinnedDateClass(fixedMs) {
  * コードを返す関数（例: サマリー本文だけ 500 を返す = 一時的な送信障害の模擬）。
  * Calendar API は 200 + 予定 (calendarItems) を返す。送信件数は counter で数えるだけ。
  */
-function loadGas(props, { dateMs = null, counter = null, lineStatus = 200, calendarItems = [] } = {}) {
+function loadGas(props, { dateMs = null, counter = null, lineStatus = 200, calendarItems = [], logs = null } = {}) {
   const source = fs
     .readdirSync(gasDir)
     .filter((f) => f.endsWith(".gs"))
@@ -138,7 +138,12 @@ function loadGas(props, { dateMs = null, counter = null, lineStatus = 200, calen
         };
       },
     },
-    console: { log() {}, warn() {}, error() {} },
+    // console はログを採取できるようにする（差分ログの検証に使う）
+    console: {
+      log: (m) => void (logs && logs.push(String(m))),
+      warn: (m) => void (logs && logs.push(String(m))),
+      error: (m) => void (logs && logs.push(String(m))),
+    },
   };
   if (dateMs !== null) context.Date = pinnedDateClass(dateMs);
   vm.createContext(context);
@@ -361,13 +366,16 @@ check("差分ポーリング: 正常系（polls=1, LAST_CHECKED_AT 進む, キ�
 });
 
 // 2〜4 は連続したシナリオ（LINE 500 失敗 -> 復旧再送 -> 3回目重複防止）
+// イベントの updated (17:59:50) は 3 回目の実行時に SAFETY_OFFSET の 60 秒巻き戻し窓
+// (18:00:45 - 60s = 17:59:45) へ入り直す。classifyChange を通過した上で
+// NOTIFIED_CACHE に弾かれる、すなわちキャッシュが機能する唯一の経路を検証する。
 const retryScenario = {
   initialLastChecked: "2026-09-20T17:50:00.000Z",
   ev: {
     id: "event-retry",
     summary: "再送対象の予定",
     created: "2026-09-20T17:55:00.000Z",
-    updated: "2026-09-20T17:55:00.000Z",
+    updated: "2026-09-20T17:59:50.000Z",
     start: { dateTime: "2026-09-21T10:00:00+09:00" },
     end: { dateTime: "2026-09-21T11:00:00+09:00" },
   },
@@ -398,26 +406,37 @@ check("差分ポーリング: LINE 500 失敗時に LAST_CHECKED_AT を進めず
 // 3. 失敗から復旧したあとの再送
 check("差分ポーリング: 復旧後の再送で未送信の変更が届き、LAST_CHECKED_AT が進む", () => {
   loadGas(retryScenario.props, {
-    dateMs: new Date("2026-09-20T18:05:00.000Z").getTime(),
+    dateMs: new Date("2026-09-20T18:00:45.000Z").getTime(),
     counter: retryScenario.counter,
     calendarItems: [retryScenario.ev],
     lineStatus: 200,
   }).pollCalendarAndNotify();
 
   assert.equal(retryScenario.counter.polls, 1, "復旧後に失敗した回の変更が届く");
-  assert.equal(retryScenario.props.getProperty("LAST_CHECKED_AT"), "2026-09-20T18:05:00.000Z", "成功で LAST_CHECKED_AT が進む");
+  assert.equal(retryScenario.props.getProperty("LAST_CHECKED_AT"), "2026-09-20T18:00:45.000Z", "成功で LAST_CHECKED_AT が進む");
   assert.equal(retryScenario.props.getProperty("LAST_FAILURE_NOTIFIED_AT"), null, "成功で失敗通知がクリアされる");
+  const cache = JSON.parse(retryScenario.props.getProperty("NOTIFIED_CACHE") || "{}");
+  assert.equal(cache[retryScenario.ev.id], retryScenario.ev.updated, "送信成功でキャッシュに記録される");
 });
 
 // 4. 復旧後の 3 回目の実行
-check("差分ポーリング: 復旧後の3回目実行で重複送信されない（NOTIFIED_CACHE）", () => {
+// SAFETY_OFFSET の 60 秒巻き戻しで同じ予定が差分窓に再侵入する。classifyChange を
+// 通過した上でキャッシュに弾かれていることを差分ログで確かめる。
+// ログが "1 updates ... (0 new)" でなければ、フィルタ順序が逆 (予定ごと除外) に戻っている。
+check("差分ポーリング: 3回目は差分窓に再侵入しても NOTIFIED_CACHE で弾かれ送信しない", () => {
+  const logs = [];
   loadGas(retryScenario.props, {
     dateMs: new Date("2026-09-20T18:10:00.000Z").getTime(),
     counter: retryScenario.counter,
     calendarItems: [retryScenario.ev],
     lineStatus: 200,
+    logs,
   }).pollCalendarAndNotify();
 
+  const diff = logs.find((l) => l.includes("Calendar diff:"));
+  assert.ok(diff, "差分ログが出力されている");
+  assert.match(diff, /Calendar diff: 1 updates since/, "classifyChange を通過して 1 件が差分として拾われている");
+  assert.match(diff, /\(0 new\)$/, "NOTIFIED_CACHE によって新規 0 件に弾かれている");
   assert.equal(retryScenario.counter.polls, 1, "同じ予定は重複通知されない");
 });
 
