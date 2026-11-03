@@ -140,6 +140,8 @@ Setting the `DEBUG_MODE` script property to `true` skips actual posting to each 
 
 A new feature has been added to send a weekly summary of upcoming events every Sunday evening (or configurable day).
 
+A summary longer than the 5,000-character limit of a single LINE message is split into several messages and delivered in full; no part of the summary is dropped. The send is recorded as delivered only when every message succeeded.
+
 ### Setup
 
 1. **Enable / disable**: The feature is enabled by default. To disable it, set the script property `WEEKLY_SUMMARY_ENABLED` to `false` (no need to set `true`).

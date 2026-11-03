@@ -74,6 +74,67 @@ function truncateMessage(text, maxLen) {
 }
 
 /**
+ * 長いテキストを maxLen 以下の断片に分割する（内容を切り捨てない）。
+ *
+ * - 改行境界を優先する。分割点になった改行は断片に含めない。
+ *   そのため、どの行も maxLen に収まる通常のケースでは、
+ *   断片を "\n" で再結合すると原文に一致する。
+ * - 単独の行が maxLen を超える場合だけ、その行を maxLen ごとにハード分割する。
+ *   分割点が改行ではないため、この場合は "\n" で再結合しても原文には戻らない
+ *   （ハード分割が起きると改行を除く本文は欠落せずに残す）。
+ * - 空文字は空配列、maxLen 以下のテキストは [text] を返す。
+ * - 断片が空文字になることはない（空の行は区切りとして扱う）。
+ *
+ * @param {string} text 分割対象のテキスト
+ * @param {number} maxLen 1 断片あたりの最大文字数
+ * @return {string[]} maxLen 以下の断片の配列
+ */
+function splitLongText(text, maxLen) {
+  if (!text) return [];
+
+  const limit = Math.floor(maxLen);
+  // 分割できない設定のときはそのまま 1 断片として返す（内容を落とさない）
+  if (!Number.isFinite(limit) || limit < 1) return [text];
+  if (text.length <= limit) return [text];
+
+  const chunks = [];
+  // null は「まだ断片を開始していない」を表す。空の行があるため
+  // 真偽値では「開始済み」と区別できない。
+  let current = null;
+
+  for (const line of text.split("\n")) {
+    if (line.length > limit) {
+      // 単独行が上限を超える: maxLen ごとにハード分割する
+      if (current !== null) {
+        if (current) chunks.push(current);
+        current = null;
+      }
+      let rest = line;
+      while (rest.length > limit) {
+        chunks.push(rest.slice(0, limit));
+        rest = rest.slice(limit);
+      }
+      // 残った部分を次の断片の開始にする（空文字列なら次の行と "\n" でつながる）
+      current = rest;
+      continue;
+    }
+
+    if (current === null) {
+      current = line;
+    } else if (current.length + 1 + line.length <= limit) {
+      current += "\n" + line;
+    } else {
+      // この改行で区切って次の断片へ（分割点の改行は消費する）
+      if (current) chunks.push(current);
+      current = line;
+    }
+  }
+
+  if (current !== null && current) chunks.push(current);
+  return chunks;
+}
+
+/**
  * プロパティのセットアップ状態を検証する関数
  * Validate property setup status
  * 

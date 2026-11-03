@@ -85,9 +85,10 @@ function sendWeeklySummary() {
   
   // Format the summary
   const summary = formatWeeklySummary(events, startDate, endDate, tz);
-  
-  // Send to LINE
-  const messages = [summary];
+
+  // LINE は 1 メッセージ 5000 文字まで。予定が多い週は上限を超えるため、
+  // 改行境界で分割した断片を 1 メッセージずつ送る（内容は切り捨てない）。
+  const chunks = splitLongText(summary, LINE_MAX_TEXT_LENGTH);
   let lineOk = true;
 
   if (isDebugMode(props)) {
@@ -97,8 +98,9 @@ function sendWeeklySummary() {
   }
 
   try {
-    postToLine(lineChannelAccessToken, lineTargetId, messages);
-    logInfo("Weekly summary sent to LINE.");
+    // 分割済みの断片はそのまま送る（5 件/push のバッチと push 間の sleep は既存実装を再利用）
+    postToLineInChunks(lineChannelAccessToken, lineTargetId, chunks, { preSplit: true });
+    logInfo(`Weekly summary sent to LINE (${chunks.length} message(s)).`);
   } catch (err) {
     logError("Weekly summary: LINE send failed.", err);
     lineOk = false;

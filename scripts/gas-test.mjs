@@ -88,8 +88,10 @@ function pinnedDateClass(fixedMs) {
  * lineStatus は LINE push の応答コード。数値、または push の本文 (payload) から
  * コードを返す関数（例: サマリー本文だけ 500 を返す = 一時的な送信障害の模擬）。
  * Calendar API は 200 + 予定 (calendarItems) を返す。送信件数は counter で数えるだけ。
+ * linePayloads を渡すと、受信した LINE push ごとの { code, texts } を採取する
+ * （本文を結合して「届いた全文」を検証するため。カウンタの意味は変えない）。
  */
-function loadGas(props, { dateMs = null, counter = null, lineStatus = 200, calendarItems = [], logs = null } = {}) {
+function loadGas(props, { dateMs = null, counter = null, lineStatus = 200, calendarItems = [], logs = null, linePayloads = null } = {}) {
   const source = fs
     .readdirSync(gasDir)
     .filter((f) => f.endsWith(".gs"))
@@ -116,12 +118,32 @@ function loadGas(props, { dateMs = null, counter = null, lineStatus = 200, calen
             ? lineStatus(payload)
             : lineStatus
           : 200;
+        // 届いた push ごとに本文を採取する（分割送信の検証用）
+        if (isLine && linePayloads) {
+          let texts = [];
+          try {
+            texts = (JSON.parse(payload).messages || []).map((m) => m.text);
+          } catch (_) {
+            texts = [];
+          }
+          linePayloads.push({ code, texts });
+        }
         // 届いた数を数える（200 応答のみ。失敗した push は delivery に数えない）
         if (isLine && counter && code === 200) {
           // 週次サマリー本文、差分通知本文、失敗通知本文を区別して数える
-          if (payload.includes("📅 今週の予定")) counter.sends = (counter.sends || 0) + 1;
-          else if (payload.includes("【Googleカレンダー更新】")) counter.polls = (counter.polls || 0) + 1;
-          else if (payload.includes("家族カレンダー通知の実行に失敗")) counter.warnings = (counter.warnings || 0) + 1;
+          if (payload.includes("📅 今週の予定")) {
+            counter.sends = (counter.sends || 0) + 1;
+            counter.lastKind = "summary";
+          } else if (payload.includes("【Googleカレンダー更新】")) {
+            counter.polls = (counter.polls || 0) + 1;
+            counter.lastKind = "poll";
+          } else if (payload.includes("家族カレンダー通知の実行に失敗")) {
+            counter.warnings = (counter.warnings || 0) + 1;
+            counter.lastKind = "warning";
+          } else if (counter.lastKind === "summary") {
+            // 週次サマリーの 2 断片目以降はヘッダーを含まないため、直前の種別で数える
+            counter.sends = (counter.sends || 0) + 1;
+          }
         }
         if (code !== 200) {
           return {
@@ -532,6 +554,172 @@ check("computeLastCheckedDate: 未設定・不正値・上限キャップの計�
   assert.equal(res10h.date.getTime(), now.getTime() - sixHoursMs);
   const expectedDroppedMs = (now.getTime() - sixHoursMs) - (new Date(tenHoursAgo).getTime() - safetyOffsetMs);
   assert.equal(res10h.droppedMs, expectedDroppedMs);
+});
+
+// --- ⑦ 週次サマリーの文字数上限分割 ----------------------------------------
+// LINE は 1 メッセージ 5000 文字まで。予定が多い週は上限を超えるため、
+// 全文を改行境界で分割した断片として 1 メッセージずつ送る必要がある。
+// splitLongText は純関数なので単体で検証し、続けて sendWeeklySummary() 経由で
+// LINE スタブが実際にどう受け取るかを確認する。
+check("splitLongText: 空文字は空配列", () => {
+  const ctx = loadGas(propsStub());
+  assert.deepEqual([...ctx.splitLongText("", 5000)], []);
+});
+
+check("splitLongText: maxLen 以下のテキストは 1 断片のまま", () => {
+  const ctx = loadGas(propsStub());
+  assert.deepEqual([...ctx.splitLongText("短いテキスト", 5000)], ["短いテキスト"]);
+});
+
+check("splitLongText: 改行境界で分割し、\\n で再結合すると原文に一致する", () => {
+  const ctx = loadGas(propsStub());
+  const lines = [];
+  for (let i = 0; i < 50; i++) lines.push(`行${i} ${"x".repeat(20)}`);
+  const text = lines.join("\n");
+
+  const chunks = ctx.splitLongText(text, 100);
+  assert.ok(chunks.length > 1, "複数断片に分割される");
+  assert.ok(
+    chunks.every((c) => c.length <= 100),
+    "全断片が maxLen 以下",
+  );
+  assert.equal(chunks.join("\n"), text, "改行で再結合すると原文に一致する");
+});
+
+check("splitLongText: 超長単独行は maxLen ごとにハード分割する", () => {
+  const ctx = loadGas(propsStub());
+  const text = "x".repeat(12500);
+
+  const chunks = ctx.splitLongText(text, 5000);
+  assert.equal(chunks.length, 3, "5000 文字ごとに 3 断片");
+  assert.ok(
+    chunks.every((c) => c.length <= 5000),
+    "全断片が maxLen 以下",
+  );
+  assert.equal(chunks.join(""), text, "内容は切り捨てられない");
+});
+
+check("splitLongText: 超長行が混ざっても全断片が maxLen 以下で本文は失われない", () => {
+  const ctx = loadGas(propsStub());
+  const text = ["短い行", "y".repeat(7000), "もう一行"].join("\n");
+
+  const chunks = ctx.splitLongText(text, 5000);
+  assert.ok(chunks.length >= 3, "長い行はハード分割される");
+  assert.ok(
+    chunks.every((c) => c.length <= 5000),
+    "全断片が maxLen 以下",
+  );
+  assert.equal(
+    chunks.join("").replace(/\n/g, ""),
+    text.replace(/\n/g, ""),
+    "改行以外の本文は失われない",
+  );
+});
+
+check("splitLongText: 空の断片は作らない（先頭が空行 + 超長行）", () => {
+  const ctx = loadGas(propsStub());
+  const text = ["", "z".repeat(7000), "末尾"].join("\n");
+
+  const chunks = ctx.splitLongText(text, 5000);
+  assert.ok(chunks.length > 0, "断片ができる");
+  assert.ok(chunks.every((c) => c.length > 0), "空の断片を含まない");
+  assert.ok(chunks.every((c) => c.length <= 5000), "全断片が maxLen 以下");
+  assert.ok(
+    chunks.join("").includes("z".repeat(7000)),
+    "超長行の内容が欠落しない",
+  );
+});
+
+/** 週次サマリーの文字数上限（5000 文字）を確実に超えるだけの予定を作る */
+function manyEvents(perDay = 50) {
+  const events = [];
+  for (let day = 21; day <= 27; day++) {
+    for (let i = 0; i < perDay; i++) {
+      const hour = String(8 + (i % 10)).padStart(2, "0");
+      events.push({
+        summary: `予定${day}-${i} ${"あ".repeat(80)}`,
+        location: `場所${i}`,
+        start: { dateTime: `2026-09-${day}T${hour}:00:00+09:00` },
+        end: { dateTime: `2026-09-${day}T${hour}:30:00+09:00` },
+      });
+    }
+  }
+  return events;
+}
+
+check(
+  "週次サマリー: 5000 文字超えでも全文を分割送信し、WEEKLY_SUMMARY_LAST_SENT を記録する",
+  () => {
+    const events = manyEvents();
+    const props = propsStub({ ...SEND_PROPS });
+    const linePayloads = [];
+    const counter = { sends: 0, warnings: 0 };
+    const ctx = loadGas(props, {
+      dateMs: new Date("2026-09-20T18:00:00+09:00").getTime(),
+      counter,
+      linePayloads,
+      calendarItems: events,
+      lineStatus: 200,
+    });
+    ctx.sendWeeklySummary();
+
+    // 届いたメッセージ（push ではなくメッセージ単位）を集める
+    const delivered = linePayloads.filter((p) => p.code === 200).flatMap((p) => p.texts);
+    assert.ok(delivered.length > 5, `複数メッセージに分割される（実際 ${delivered.length} 件）`);
+    assert.ok(
+      delivered.every((t) => t.length <= 5000),
+      "各メッセージは 5000 文字以下",
+    );
+    assert.ok(
+      linePayloads.length < delivered.length,
+      "5 メッセージずつ 1 push にまとめている（push 間に sleep）",
+    );
+
+    // 届いた断片を改行で再結合すると全文に一致する
+    const joined = delivered.join("\n");
+    const expected = ctx.formatWeeklySummary(
+      events,
+      new Date("2026-09-21T00:00:00+09:00"), // 実行日の翌日 00:00
+      new Date("2026-09-28T00:00:00+09:00"), //  8 日目 00:00（終了日時は排他的）
+      TZ,
+    );
+    assert.ok(joined.includes("📅 今週の予定"), "ヘッダーが含まれる");
+    assert.ok(joined.includes(`合計: ${events.length}件の予定`), "末尾の合計行が含まれる");
+    assert.equal(joined, expected, "全文が欠落なく届く");
+
+    assert.equal(props.getProperty("WEEKLY_SUMMARY_LAST_SENT"), "2026-09-20");
+    assert.equal(props.getProperty("LAST_FAILURE_NOTIFIED_AT"), null, "失敗通知は出ない");
+  },
+);
+
+check("週次サマリー: 分割送信の途中で失敗したら WEEKLY_SUMMARY_LAST_SENT を記録しない", () => {
+  const events = manyEvents();
+  const props = propsStub({ ...SEND_PROPS });
+  const linePayloads = [];
+  const counter = { sends: 0, warnings: 0 };
+  let calls = 0;
+  const lineStatus = () => {
+    calls++;
+    // 2 番目の push（週次サマリーの後半）が失敗する。3 番目は失敗通知の push。
+    return calls === 2 ? 500 : 200;
+  };
+
+  loadGas(props, {
+    dateMs: new Date("2026-09-20T18:00:00+09:00").getTime(),
+    counter,
+    linePayloads,
+    calendarItems: events,
+    lineStatus,
+  }).sendWeeklySummary();
+
+  const failed = linePayloads.filter((p) => p.code !== 200);
+  assert.equal(failed.length, 1, "2 番目の push が失敗する");
+  assert.ok(
+    linePayloads[0].texts.some((t) => t.includes("📅 今週の予定")),
+    "前半の push は送达済み",
+  );
+  assert.equal(props.getProperty("WEEKLY_SUMMARY_LAST_SENT"), null, "失敗時は記録しない");
+  assert.equal(counter.warnings, 1, "失敗通知を 1 通送る");
 });
 
 if (failed > 0) {

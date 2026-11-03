@@ -1,11 +1,13 @@
 # Weekly Summary Feature Design
 
 ## Goal
+
 家族が翌週の予定を把握できるように、明日から始まる今後7日間の予定ダイジェストを送信します。配信スケジュールはデフォルトで毎週日曜日の夕方（設定により変更可能）です。
 
 ## Implementation
 
 ### 1. Function: `sendWeeklySummary()`
+
 - 通常のポーリングトリガーとは別の週次トリガーで実行
 - Google カレンダーから明日以降の7日間の予定を取得
 - サマリーメッセージを整形
@@ -14,9 +16,11 @@
 - 同日の重複送信を防止（`WEEKLY_SUMMARY_LAST_SENT` を確認・更新）
 
 ### 2. Message Format
+
 ダイジェストの対象期間は明日 00:00 から 8 日目 00:00 までの完全な 7 日間（終了日時は排他的）です。予定が 0 件の場合でもサマリーメッセージが送信されます。
 
 メッセージ構成:
+
 - ヘッダー: `📅 今週の予定 (Weekly Plan)` + 改行 + `yyyy/MM/dd - yyyy/MM/dd` + 改行 + 区切り線（`━━━━━━━━━━━━━━━━━━━━━━━━`）
 - 各曜日の見出し: `【X曜日】`
 - 通常の予定: `• HH:mm - title`
@@ -26,6 +30,7 @@
 - フッター: 区切り線（`━━━━━━━━━━━━━━━━━━━━━━━━`） + 改行 + `合計: N件の予定`
 
 サンプル（開始日が月曜日の場合。開始曜日は実行日に依存する）:
+
 ```
 📅 今週の予定 (Weekly Plan)
 2026/08/31 - 2026/09/06
@@ -60,6 +65,7 @@
 ```
 
 ### 3. Configuration
+
 - `WEEKLY_SUMMARY_ENABLED`: 有効化フラグ（デフォルト: `true`、無効化する場合は `"false"` を設定）
 - `WEEKLY_SUMMARY_DAY`: 送信曜日（デフォルト: `0` = 日曜日、0=日曜、1=月曜...）
 - `WEEKLY_SUMMARY_HOUR`: 送信時（24時間表記、デフォルト: `18`。範囲外は 0〜23 にクランプ）
@@ -67,15 +73,23 @@
 - `WEEKLY_SUMMARY_LAST_SENT`: 自動管理プロパティ（同日の重複送信防止用。スクリプトタイムゾーンの日付 `yyyy-MM-dd` を保存、手動設定不要。旧形式の UTC ISO 値も当日分として扱う。**送信に成功したときだけ更新する**。全チャネルの送信に失敗した日は記録しないため、復旧後は当日中に再実行すれば再送できる）
 
 ### 4. Trigger Setup
+
 - `installWeeklySummaryTrigger()`: 設定された曜日（day）、時（hour）、分（minute）を反映した週次タイムベーストリガーを作成（既存のサマリートリガーがあれば削除して再作成）。day は範囲外なら日曜へフォールバック、hour と minute は範囲内にクランプし、丸めた場合はログに WARN として残す
 - `uninstallWeeklySummaryTrigger()`: 登録されている週次サマリートリガーを削除
 - 通常のカレンダーポーリングトリガー（5分間隔）とは独立して動作
 
+### 5. 長いサマリーの分割送信
+- LINE は 1 メッセージ 5000 文字まで。予定が多い週は上限を超えるため、サマリーは `splitLongText(summary, LINE_MAX_TEXT_LENGTH)` で改行境界優先の断片に分割し、1 メッセージずつ送る（内容は切り捨てない。単独行が上限を超える場合のみ maxLen ごとにハード分割する）
+- 分割済みの断片は `postToLineInChunks(..., { preSplit: true })` で送る。5 メッセージずつ 1 push にまとめ、push 間の sleep は既存実装を再用する
+- 全断片の送信が成功したときだけ `WEEKLY_SUMMARY_LAST_SENT` を記録する。途中で失敗したときは記録せず、失敗通知を出す（復旧後は当日中に再実行すれば再送できる）
+
 ## Benefits
+
 - 家族があらかじめ1週間の予定を把握可能
 - 毎日の通知ノイズを削減し、週単位の概要を提供
 
 ## Next Steps
+
 - [x] Implement `sendWeeklySummary()` function: `gas/WeeklySummary.gs` に実装完了（Google カレンダーから翌7日間の予定を取得して整形・送信）
 - [x] Add configuration properties: `gas/WeeklySummary.gs` に `WEEKLY_SUMMARY_PROP_KEYS`（enabled, dayOfWeek, hour, minute, lastSentAt）を定義完了
 - [x] Set up weekly trigger: `gas/WeeklySummary.gs` に設定値（曜日・時・分）を反映する `installWeeklySummaryTrigger()` / `uninstallWeeklySummaryTrigger()` を実装完了

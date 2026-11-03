@@ -298,12 +298,18 @@ function chunkMessages(messages, sep, maxLen) {
  * @param {string} channelAccessToken LINE_CHANNEL_ACCESS_TOKEN
  * @param {string} targetId LINE_TARGET_ID (ユーザー/グループ/トークルーム ID)
  * @param {string[]} messages 各更新の通知メッセージ配列
+ * @param {{preSplit?: boolean}} [options] preSplit=true のときは messages を
+ *   すでに文字数上限で分割済みの断片として扱い、そのまま 1 メッセージずつ送る
+ *   （区切り文字を挿入しないので、届いた内容は元の改行の配置を保ったままになる）
  */
-function postToLineInChunks(channelAccessToken, targetId, messages) {
+function postToLineInChunks(channelAccessToken, targetId, messages, options) {
   // NOTE: If this fails midway across multiple pushes, the batches already sent are not recorded
   // in NOTIFIED_CACHE, so they may be redelivered on the next run. Duplication is safer than
   // dropping notifications; recording the cache per-push would avoid it if it ever matters.
-  const chunks = chunkMessages(messages, "\n\n", LINE_MAX_TEXT_LENGTH);
+  const preSplit = !!(options && options.preSplit);
+  const chunks = preSplit
+    ? messages
+    : chunkMessages(messages, "\n\n", LINE_MAX_TEXT_LENGTH);
   // LINE_MAX_MESSAGES_PER_PUSH 件ずつ 1 push にまとめて送信
   for (let i = 0; i < chunks.length; i += LINE_MAX_MESSAGES_PER_PUSH) {
     if (i > 0) Utilities.sleep(LINE_CHUNK_INTERVAL_MS);
