@@ -91,18 +91,38 @@ function pinnedDateClass(fixedMs) {
  * linePayloads を渡すと、受信した LINE push ごとの { code, texts } を採取する
  * （本文を結合して「届いた全文」を検証するため。カウンタの意味は変えない）。
  */
-function loadGas(props, { dateMs = null, counter = null, lineStatus = 200, calendarItems = [], logs = null, linePayloads = null } = {}) {
+function loadGas(
+  props,
+  {
+    dateMs = null,
+    counter = null,
+    lineStatus = 200,
+    calendarStatus = 200,
+    calendarItems = [],
+    logs = null,
+    linePayloads = null,
+    sleepLogs = null,
+  } = {},
+) {
   const source = fs
     .readdirSync(gasDir)
     .filter((f) => f.endsWith(".gs"))
     .sort()
     .map((f) => fs.readFileSync(path.join(gasDir, f), "utf-8"))
     .join("\n\n");
+  let calendarCallCount = 0;
   const context = {
     PropertiesService: { getScriptProperties: () => props },
     ScriptApp: scriptAppStub(),
     Session: { getScriptTimeZone: () => TZ },
-    Utilities: utilitiesStub,
+    Utilities: {
+      formatDate: utilitiesStub.formatDate,
+      sleep: (ms) => {
+        if (sleepLogs) {
+          sleepLogs.push(ms);
+        }
+      },
+    },
     LockService: {
       getScriptLock: () => ({
         tryLock: () => true,
@@ -113,50 +133,88 @@ function loadGas(props, { dateMs = null, counter = null, lineStatus = 200, calen
       fetch: (url, options) => {
         const payload = String((options && options.payload) || "");
         const isLine = url.includes("line.me");
-        const code = isLine
-          ? typeof lineStatus === "function"
-            ? lineStatus(payload)
-            : lineStatus
-          : 200;
-        // 届いた push ごとに本文を採取する（分割送信の検証用）
-        if (isLine && linePayloads) {
-          let texts = [];
-          try {
-            texts = (JSON.parse(payload).messages || []).map((m) => m.text);
-          } catch (_) {
-            texts = [];
+        if (isLine) {
+          const code =
+            typeof lineStatus === "function" ? lineStatus(payload) : lineStatus;
+          // 届いた push ごとに本文を採取する（分割送信の検証用）
+          if (linePayloads) {
+            let texts = [];
+            try {
+              texts = (JSON.parse(payload).messages || []).map((m) => m.text);
+            } catch (_) {
+              texts = [];
+            }
+            linePayloads.push({ code, texts });
           }
-          linePayloads.push({ code, texts });
-        }
-        // 届いた数を数える（200 応答のみ。失敗した push は delivery に数えない）
-        if (isLine && counter && code === 200) {
-          // 週次サマリー本文、差分通知本文、失敗通知本文を区別して数える
-          if (payload.includes("📅 今週の予定")) {
-            counter.sends = (counter.sends || 0) + 1;
-            counter.lastKind = "summary";
-          } else if (payload.includes("【Googleカレンダー更新】")) {
-            counter.polls = (counter.polls || 0) + 1;
-            counter.lastKind = "poll";
-          } else if (payload.includes("家族カレンダー通知の実行に失敗")) {
-            counter.warnings = (counter.warnings || 0) + 1;
-            counter.lastKind = "warning";
-          } else if (counter.lastKind === "summary") {
-            // 週次サマリーの 2 断片目以降はヘッダーを含まないため、直前の種別で数える
-            counter.sends = (counter.sends || 0) + 1;
+          // 届いた数を数える（200 応答のみ。失敗した push は delivery に数えない）
+          if (counter && code === 200) {
+            // 週次サマリー本文、差分通知本文、失敗通知本文を区別して数える
+            if (payload.includes("📅 今週の予定")) {
+              counter.sends = (counter.sends || 0) + 1;
+              counter.lastKind = "summary";
+            } else if (payload.includes("【Googleカレンダー更新】")) {
+              counter.polls = (counter.polls || 0) + 1;
+              counter.lastKind = "poll";
+            } else if (payload.includes("家族カレンダー通知の実行に失敗")) {
+              counter.warnings = (counter.warnings || 0) + 1;
+              counter.lastKind = "warning";
+            } else if (counter.lastKind === "summary") {
+              // 週次サマリーの 2 断片目以降はヘッダーを含まないため、直前の種別で数える
+              counter.sends = (counter.sends || 0) + 1;
+            }
           }
-        }
-        if (code !== 200) {
+          if (code !== 200) {
+            return {
+              getResponseCode: () => code,
+              getContentText: () => '{"message":"stub failure"}',
+              getHeaders: () => ({}),
+            };
+          }
           return {
-            getResponseCode: () => code,
-            getContentText: () => '{"message":"stub failure"}',
+            getResponseCode: () => 200,
+            getContentText: () => '{"message":"ok"}',
             getHeaders: () => ({}),
           };
         }
+
+        // Calendar API
+        calendarCallCount++;
+        let resSpec = calendarStatus;
+        if (Array.isArray(calendarStatus)) {
+          resSpec = calendarStatus[calendarCallCount - 1] ?? 200;
+        } else if (typeof calendarStatus === "function") {
+          resSpec = calendarStatus({ url, callCount: calendarCallCount, options });
+        }
+
+        let code = 200;
+        let headers = {};
+        let body = null;
+
+        if (typeof resSpec === "number") {
+          code = resSpec;
+        } else if (resSpec && typeof resSpec === "object") {
+          code = resSpec.code ?? resSpec.status ?? 200;
+          headers = resSpec.headers || {};
+          body = resSpec.body;
+        }
+
+        if (code !== 200) {
+          return {
+            getResponseCode: () => code,
+            getContentText: () =>
+              body !== null && body !== undefined
+                ? String(body)
+                : JSON.stringify({ error: { message: "stub failure", code } }),
+            getHeaders: () => headers,
+          };
+        }
+
         const items = typeof calendarItems === "function" ? calendarItems(url) : calendarItems;
         return {
           getResponseCode: () => 200,
-          getContentText: () => JSON.stringify({ items }),
-          getHeaders: () => ({}),
+          getContentText: () =>
+            body !== null && body !== undefined ? String(body) : JSON.stringify({ items }),
+          getHeaders: () => headers,
         };
       },
     },
@@ -721,6 +779,188 @@ check("週次サマリー: 分割送信の途中で失敗したら WEEKLY_SUMMAR
   assert.equal(props.getProperty("WEEKLY_SUMMARY_LAST_SENT"), null, "失敗時は記録しない");
   assert.equal(counter.warnings, 1, "失敗通知を 1 通送る");
 });
+
+// --- 週次サマリー: Calendar API リトライとバックオフ ----------------------
+check(
+  "週次サマリー: 最初500で次に200ならリトライ成功して予定を返す",
+  () => {
+    const dummyEvents = [{ id: "1", summary: "ミーティング" }];
+    const sleepLogs = [];
+    const ctx = loadGas(propsStub(SEND_PROPS), {
+      calendarStatus: [500, 200],
+      calendarItems: dummyEvents,
+      sleepLogs,
+    });
+    const res = ctx.fetchEventsForRange(
+      "primary",
+      "2026-09-21T00:00:00Z",
+      "2026-09-28T00:00:00Z",
+    );
+    assert.equal(res.length, 1);
+    assert.equal(res[0].summary, "ミーティング");
+    assert.equal(sleepLogs.length, 1, "1回目の500失敗で1回sleepする");
+    assert.equal(sleepLogs[0], 2000, "1回目のリトライは2000ms");
+  },
+);
+
+check(
+  "週次サマリー: 429が続く場合は上限回数で打ち切り、sleepは30秒以内で最終試行後に余分なsleepをしない",
+  () => {
+    const sleepLogs = [];
+    const ctx = loadGas(propsStub(SEND_PROPS), {
+      calendarStatus: 429,
+      sleepLogs,
+    });
+    assert.throws(
+      () =>
+        ctx.listCalendarEventsRange(
+          "primary",
+          "2026-09-21T00:00:00Z",
+          "2026-09-28T00:00:00Z",
+          null,
+        ),
+      (err) => {
+        assert.ok(
+          err.message.includes("429"),
+          `エラーメッセージに429が含まれること: ${err.message}`,
+        );
+        return true;
+      },
+    );
+    // CALENDAR_API_MAX_RETRIES=3 のとき、sleep は attempt 1, attempt 2 の 2 回のみ。attempt 3 (最終) 後は sleep しない。
+    assert.equal(
+      sleepLogs.length,
+      2,
+      `最終試行後に余分な sleep をせず sleep は 2 回のみ (実際: ${sleepLogs.length}回)`,
+    );
+    for (const ms of sleepLogs) {
+      assert.ok(
+        ms >= 0 && ms <= 30000,
+        `sleep (${ms}ms) が 0 以上 30秒以下であること`,
+      );
+    }
+  },
+);
+
+check(
+  "週次サマリー: Retry-After無しの429でもsleepが既定バックオフの範囲（数秒オーダー）になる",
+  () => {
+    const sleepLogs = [];
+    const ctx = loadGas(propsStub(SEND_PROPS), {
+      calendarStatus: { code: 429, headers: {} },
+      sleepLogs,
+    });
+    assert.throws(() =>
+      ctx.listCalendarEventsRange(
+        "primary",
+        "2026-09-21T00:00:00Z",
+        "2026-09-28T00:00:00Z",
+        null,
+      ),
+    );
+    assert.equal(sleepLogs.length, 2);
+    // 修正前のバグでは 2,000,000ms (2000秒) になっていた
+    assert.equal(sleepLogs[0], 2000);
+    assert.equal(sleepLogs[1], 4000);
+    assert.ok(
+      sleepLogs.every((ms) => ms < 30000),
+      "2000秒相当にならず数秒オーダーであること",
+    );
+  },
+);
+
+check(
+  "週次サマリー: 403等の非リトライ対象4xxは1回の呼び出しで即座に失敗する",
+  () => {
+    const sleepLogs = [];
+    let callCount = 0;
+    const ctx = loadGas(propsStub(SEND_PROPS), {
+      calendarStatus: () => {
+        callCount++;
+        return { code: 403, body: '{"error":"Forbidden"}' };
+      },
+      sleepLogs,
+    });
+    assert.throws(
+      () =>
+        ctx.listCalendarEventsRange(
+          "primary",
+          "2026-09-21T00:00:00Z",
+          "2026-09-28T00:00:00Z",
+          null,
+        ),
+      (err) => {
+        assert.ok(err.message.includes("403"), "エラーメッセージに403が含まれること");
+        assert.ok(
+          err.message.includes("Forbidden"),
+          "エラーメッセージに本文が含まれること",
+        );
+        return true;
+      },
+    );
+    assert.equal(callCount, 1, "リトライせず1回で失敗する");
+    assert.equal(sleepLogs.length, 0, "sleep しない");
+  },
+);
+
+check(
+  "週次サマリー: 429で大きなRetry-After（例: 3600）が返ってもsleepは上限（30秒）でキャップされる",
+  () => {
+    const sleepLogs = [];
+    const ctx = loadGas(propsStub(SEND_PROPS), {
+      calendarStatus: { code: 429, headers: { "Retry-After": "3600" } },
+      sleepLogs,
+    });
+    assert.throws(() =>
+      ctx.listCalendarEventsRange(
+        "primary",
+        "2026-09-21T00:00:00Z",
+        "2026-09-28T00:00:00Z",
+        null,
+      ),
+    );
+    assert.equal(sleepLogs.length, 2);
+    assert.equal(
+      sleepLogs[0],
+      30000,
+      "3600秒 (3600000ms) は 30000ms にキャップされる",
+    );
+    assert.equal(
+      sleepLogs[1],
+      30000,
+      "3600秒 (3600000ms) は 30000ms にキャップされる",
+    );
+  },
+);
+
+check(
+  "週次サマリー: 429で数値でないまたは負数のRetry-Afterは既定バックオフを使う",
+  () => {
+    const sleepLogs = [];
+    let attempt = 0;
+    const ctx = loadGas(propsStub(SEND_PROPS), {
+      calendarStatus: () => {
+        attempt++;
+        return {
+          code: 429,
+          headers: { "Retry-After": attempt === 1 ? "invalid" : "-5" },
+        };
+      },
+      sleepLogs,
+    });
+    assert.throws(() =>
+      ctx.listCalendarEventsRange(
+        "primary",
+        "2026-09-21T00:00:00Z",
+        "2026-09-28T00:00:00Z",
+        null,
+      ),
+    );
+    assert.equal(sleepLogs.length, 2);
+    assert.equal(sleepLogs[0], 2000, "invalid の場合は既定バックオフ 2000ms");
+    assert.equal(sleepLogs[1], 4000, "負数の場合は既定バックオフ 4000ms");
+  },
+);
 
 if (failed > 0) {
   console.error(`${failed} test(s) failed.`);

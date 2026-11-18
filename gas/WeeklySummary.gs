@@ -178,9 +178,10 @@ function listCalendarEventsRange(calendarId, timeMin, timeMax, pageToken) {
     muteHttpExceptions: true,
   };
   
-  let res;
+  let lastRes = null;
   for (let attempt = 1; attempt <= CALENDAR_API_MAX_RETRIES; attempt++) {
-    res = UrlFetchApp.fetch(url, options);
+    const res = UrlFetchApp.fetch(url, options);
+    lastRes = res;
     const code = res.getResponseCode();
     if (code === 200) {
       const data = JSON.parse(res.getContentText());
@@ -189,23 +190,40 @@ function listCalendarEventsRange(calendarId, timeMin, timeMax, pageToken) {
         nextPageToken: data.nextPageToken || null,
       };
     }
-    
-    // Handle rate limiting (429)
-    if (code === 429) {
-      let waitMs = 2000 * attempt;
-      try {
-        const headers = res.getHeaders();
-        waitMs = parseInt(headers["Retry-After"] || "2000", 10) * 1000;
-      } catch (_) {}
-      logWarn(`Calendar API rate limit (429). Retrying in ${waitMs}ms (${attempt}/${CALENDAR_API_MAX_RETRIES})`);
-      Utilities.sleep(waitMs);
-      continue;
+
+    const isTransient = code === 429 || (code >= 500 && code < 600);
+    if (!isTransient) {
+      throw new Error(`Calendar API error (${code}): ${res.getContentText()}`);
     }
-    
-    throw new Error(`Calendar API error (${code}): ${res.getContentText()}`);
+
+    if (attempt < CALENDAR_API_MAX_RETRIES) {
+      let waitMs = 2000 * attempt;
+      if (code === 429) {
+        try {
+          const headers = res.getHeaders() || {};
+          const retryAfter = headers["Retry-After"] || headers["retry-after"];
+          if (retryAfter !== undefined && retryAfter !== null && String(retryAfter).trim() !== "") {
+            const parsedSec = parseInt(String(retryAfter).trim(), 10);
+            if (!Number.isNaN(parsedSec) && parsedSec >= 0) {
+              waitMs = parsedSec * 1000;
+            }
+          }
+        } catch (_) {}
+      }
+      waitMs = Math.min(Math.max(waitMs, 0), 30000);
+      if (Number.isNaN(waitMs)) {
+        waitMs = 2000 * attempt;
+      }
+      logWarn(
+        `Calendar API temporary error (${code}). Retrying in ${waitMs}ms (${attempt}/${CALENDAR_API_MAX_RETRIES})`,
+      );
+      Utilities.sleep(waitMs);
+    }
   }
-  
-  throw new Error("Calendar API: Retry limit exceeded");
+
+  const lastCode = lastRes ? lastRes.getResponseCode() : "unknown";
+  const lastBody = lastRes ? lastRes.getContentText() : "";
+  throw new Error(`Calendar API: Retry limit exceeded (${lastCode}): ${lastBody}`);
 }
 
 /**
